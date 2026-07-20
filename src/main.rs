@@ -1,0 +1,78 @@
+mod ast;
+mod codegen;
+mod lexer;
+mod parser;
+mod token;
+
+use std::path::Path;
+use std::process::Command;
+
+use inkwell::context::Context;
+
+use codegen::Codegen;
+use lexer::Lexer;
+use parser::Parser;
+
+const SOURCE: &str = r#"
+    fn add(a: int, b: int) -> int {
+        return a + b;
+    }
+
+    fn main() {
+        let x: int = 5;
+        let y: int = 10;
+        if x < y {
+            print(add(x, y));
+        } else {
+            print(0);
+        }
+
+        let i: int = 0;
+        while i < 3 {
+            print(i);
+            i = i + 1;
+        }
+    }
+"#;
+
+fn main() {
+    let tokens = Lexer::new(SOURCE).tokenize().unwrap_or_else(|e| {
+        eprintln!("lex error: {e}");
+        std::process::exit(1);
+    });
+
+    let program = Parser::new(tokens).parse_program().unwrap_or_else(|e| {
+        eprintln!("parse error: {e}");
+        std::process::exit(1);
+    });
+
+    let context = Context::create();
+    let mut codegen = Codegen::new(&context, "cyborgpl");
+    codegen.compile_program(&program);
+
+    println!("--- LLVM IR ---");
+    println!("{}", codegen.module().print_to_string().to_string());
+
+    let obj_path = Path::new("/tmp/cyborgpl_out.o");
+    let bin_path = Path::new("/tmp/cyborgpl_out");
+
+    if let Err(e) = codegen.write_object_file(obj_path) {
+        eprintln!("codegen error: {e}");
+        std::process::exit(1);
+    }
+
+    let status = Command::new("cc")
+        .arg(obj_path)
+        .arg("-o")
+        .arg(bin_path)
+        .status()
+        .expect("failed to invoke cc");
+    if !status.success() {
+        eprintln!("linking failed");
+        std::process::exit(1);
+    }
+
+    println!("--- running compiled binary ---");
+    let run_status = Command::new(bin_path).status().expect("failed to run compiled binary");
+    println!("--- exit code: {:?} ---", run_status.code());
+}

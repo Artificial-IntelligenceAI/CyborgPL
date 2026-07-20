@@ -1,0 +1,180 @@
+use crate::token::Token;
+
+pub struct Lexer<'a> {
+    chars: std::iter::Peekable<std::str::Chars<'a>>,
+    pub line: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct Spanned {
+    pub token: Token,
+    pub line: usize,
+}
+
+impl<'a> Lexer<'a> {
+    pub fn new(source: &'a str) -> Self {
+        Lexer {
+            chars: source.chars().peekable(),
+            line: 1,
+        }
+    }
+
+    pub fn tokenize(mut self) -> Result<Vec<Spanned>, String> {
+        let mut tokens = Vec::new();
+        loop {
+            let spanned = self.next_token()?;
+            let is_eof = spanned.token == Token::Eof;
+            tokens.push(spanned);
+            if is_eof {
+                break;
+            }
+        }
+        Ok(tokens)
+    }
+
+    fn next_token(&mut self) -> Result<Spanned, String> {
+        self.skip_whitespace_and_comments();
+        let line = self.line;
+
+        let c = match self.chars.next() {
+            Some(c) => c,
+            None => return Ok(Spanned { token: Token::Eof, line }),
+        };
+
+        let token = match c {
+            '(' => Token::LParen,
+            ')' => Token::RParen,
+            '{' => Token::LBrace,
+            '}' => Token::RBrace,
+            ',' => Token::Comma,
+            ':' => Token::Colon,
+            ';' => Token::Semicolon,
+            '+' => Token::Plus,
+            '*' => Token::Star,
+            '/' => Token::Slash,
+            '-' => {
+                if self.peek_char() == Some('>') {
+                    self.chars.next();
+                    Token::Arrow
+                } else {
+                    Token::Minus
+                }
+            }
+            '=' => {
+                if self.peek_char() == Some('=') {
+                    self.chars.next();
+                    Token::EqEq
+                } else {
+                    Token::Eq
+                }
+            }
+            '!' => {
+                if self.peek_char() == Some('=') {
+                    self.chars.next();
+                    Token::BangEq
+                } else {
+                    Token::Bang
+                }
+            }
+            '<' => {
+                if self.peek_char() == Some('=') {
+                    self.chars.next();
+                    Token::LtEq
+                } else {
+                    Token::Lt
+                }
+            }
+            '>' => {
+                if self.peek_char() == Some('=') {
+                    self.chars.next();
+                    Token::GtEq
+                } else {
+                    Token::Gt
+                }
+            }
+            '&' => {
+                if self.peek_char() == Some('&') {
+                    self.chars.next();
+                    Token::AndAnd
+                } else {
+                    return Err(format!("line {}: unexpected character '&'", line));
+                }
+            }
+            '|' => {
+                if self.peek_char() == Some('|') {
+                    self.chars.next();
+                    Token::OrOr
+                } else {
+                    return Err(format!("line {}: unexpected character '|'", line));
+                }
+            }
+            '0'..='9' => self.lex_number(c),
+            c if c.is_alphabetic() || c == '_' => self.lex_ident(c),
+            other => return Err(format!("line {}: unexpected character '{}'", line, other)),
+        };
+
+        Ok(Spanned { token, line })
+    }
+
+    fn lex_number(&mut self, first: char) -> Token {
+        let mut s = String::new();
+        s.push(first);
+        while let Some(&c) = self.chars.peek() {
+            if c.is_ascii_digit() {
+                s.push(c);
+                self.chars.next();
+            } else {
+                break;
+            }
+        }
+        Token::Int(s.parse().expect("digit-only string must parse as i64"))
+    }
+
+    fn lex_ident(&mut self, first: char) -> Token {
+        let mut s = String::new();
+        s.push(first);
+        while let Some(&c) = self.chars.peek() {
+            if c.is_alphanumeric() || c == '_' {
+                s.push(c);
+                self.chars.next();
+            } else {
+                break;
+            }
+        }
+        Token::keyword_from_str(&s).unwrap_or(Token::Ident(s))
+    }
+
+    fn skip_whitespace_and_comments(&mut self) {
+        loop {
+            match self.chars.peek() {
+                Some('\n') => {
+                    self.line += 1;
+                    self.chars.next();
+                }
+                Some(c) if c.is_whitespace() => {
+                    self.chars.next();
+                }
+                Some('/') => {
+                    let mut clone = self.chars.clone();
+                    clone.next();
+                    if clone.peek() == Some(&'/') {
+                        // line comment: consume until newline
+                        while let Some(&c) = self.chars.peek() {
+                            if c == '\n' {
+                                break;
+                            }
+                            self.chars.next();
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+    }
+
+    fn peek_char(&mut self) -> Option<char> {
+        self.chars.peek().copied()
+    }
+}
