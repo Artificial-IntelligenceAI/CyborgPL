@@ -1,5 +1,5 @@
 START
 
-print*"Hello, World!"*;
+print*"Hello"cut""*;
 
 END
