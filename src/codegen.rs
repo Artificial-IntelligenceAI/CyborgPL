@@ -88,27 +88,40 @@ impl<'ctx> Codegen<'ctx> {
         for f in &program.functions {
             self.compile_function(f);
         }
+        self.compile_entry(&program.entry);
     }
 
     fn declare_function(&mut self, f: &Function) {
         let param_types: Vec<BasicMetadataTypeEnum> =
             f.params.iter().map(|p| self.basic_type(p.ty).into()).collect();
 
-        // The linked C runtime expects `int main(void)`, regardless of what
-        // return type our own language's grammar allows on `main`.
-        let fn_type = if f.name == "main" {
-            self.context.i32_type().fn_type(&param_types, false)
-        } else {
-            match f.return_type {
-                Type::Num => self.context.f64_type().fn_type(&param_types, false),
-                Type::Bool => self.context.bool_type().fn_type(&param_types, false),
-                Type::Str => self.context.ptr_type(AddressSpace::default()).fn_type(&param_types, false),
-                Type::Void => self.context.void_type().fn_type(&param_types, false),
-            }
+        let fn_type = match f.return_type {
+            Type::Num => self.context.f64_type().fn_type(&param_types, false),
+            Type::Bool => self.context.bool_type().fn_type(&param_types, false),
+            Type::Str => self.context.ptr_type(AddressSpace::default()).fn_type(&param_types, false),
+            Type::Void => self.context.void_type().fn_type(&param_types, false),
         };
 
         let function = self.module.add_function(&f.name, fn_type, None);
         self.functions.insert(f.name.clone(), function);
+    }
+
+    /// Compiles the `START...END` block into the actual `main` the C runtime
+    /// calls to start the process — this is the language's real entry point.
+    fn compile_entry(&mut self, entry: &Block) {
+        let fn_type = self.context.i32_type().fn_type(&[], false);
+        let function = self.module.add_function("main", fn_type, None);
+        let block = self.context.append_basic_block(function, "entry");
+        self.builder.position_at_end(block);
+        self.variables.clear();
+
+        self.compile_block(entry);
+
+        let current_block = self.builder.get_insert_block().unwrap();
+        if current_block.get_terminator().is_none() {
+            let zero = self.context.i32_type().const_int(0, false);
+            self.builder.build_return(Some(&zero)).unwrap();
+        }
     }
 
     fn compile_function(&mut self, f: &Function) {
@@ -133,26 +146,21 @@ impl<'ctx> Codegen<'ctx> {
         // a return on some path instead of silently defaulting).
         let current_block = self.builder.get_insert_block().unwrap();
         if current_block.get_terminator().is_none() {
-            if f.name == "main" {
-                let zero = self.context.i32_type().const_int(0, false);
-                self.builder.build_return(Some(&zero)).unwrap();
-            } else {
-                match f.return_type {
-                    Type::Void => {
-                        self.builder.build_return(None).unwrap();
-                    }
-                    Type::Num => {
-                        let zero = self.context.f64_type().const_float(0.0);
-                        self.builder.build_return(Some(&zero)).unwrap();
-                    }
-                    Type::Bool => {
-                        let zero = self.context.bool_type().const_int(0, false);
-                        self.builder.build_return(Some(&zero)).unwrap();
-                    }
-                    Type::Str => {
-                        let null = self.context.ptr_type(AddressSpace::default()).const_null();
-                        self.builder.build_return(Some(&null)).unwrap();
-                    }
+            match f.return_type {
+                Type::Void => {
+                    self.builder.build_return(None).unwrap();
+                }
+                Type::Num => {
+                    let zero = self.context.f64_type().const_float(0.0);
+                    self.builder.build_return(Some(&zero)).unwrap();
+                }
+                Type::Bool => {
+                    let zero = self.context.bool_type().const_int(0, false);
+                    self.builder.build_return(Some(&zero)).unwrap();
+                }
+                Type::Str => {
+                    let null = self.context.ptr_type(AddressSpace::default()).const_null();
+                    self.builder.build_return(Some(&null)).unwrap();
                 }
             }
         }

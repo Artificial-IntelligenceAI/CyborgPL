@@ -20,6 +20,9 @@ pub enum Token {
     True,
     False,
     Print,
+    /// Marks the start of the program's entry point block (replaces `fn main`).
+    Start,
+    End,
 
     // Symbols
     LParen,
@@ -62,6 +65,8 @@ impl Token {
             "true" => Some(Token::True),
             "false" => Some(Token::False),
             "print" => Some(Token::Print),
+            "START" => Some(Token::Start),
+            "END" => Some(Token::End),
             _ => None,
         }
     }

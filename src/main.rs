@@ -19,24 +19,24 @@ const DEFAULT_SOURCE: &str = r#"
         return a + b;
     }
 
-    fn main() {
+    START
         var:num 'x' = 5;
         var:num 'y' = 2.5;
         if x < y {
-            print(add(x, y));
+            print*add(x, y)*;
         } else {
-            print(0);
+            print*0*;
         }
 
         var:str 'greeting' = "hello, cyborgpl";
-        print('greeting');
+        print*greeting*;
 
         var:num 'i' = 0;
         while i < 3 {
-            print(i);
+            print*i*;
             i = i + 1;
         }
-    }
+    END
 "#;
 
 fn main() {

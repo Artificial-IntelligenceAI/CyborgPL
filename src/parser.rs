@@ -16,10 +16,42 @@ impl Parser {
 
     pub fn parse_program(&mut self) -> PResult<Program> {
         let mut functions = Vec::new();
+        let mut entry: Option<Block> = None;
+
         while !self.check(&Token::Eof) {
-            functions.push(self.parse_function()?);
+            match self.peek() {
+                Token::Fn => functions.push(self.parse_function()?),
+                Token::Start => {
+                    if entry.is_some() {
+                        return Err(format!(
+                            "line {}: only one START...END block is allowed",
+                            self.tokens[self.pos].line
+                        ));
+                    }
+                    entry = Some(self.parse_entry()?);
+                }
+                other => {
+                    return Err(format!(
+                        "line {}: expected 'fn' or 'START', found {:?}",
+                        self.tokens[self.pos].line, other
+                    ));
+                }
+            }
         }
-        Ok(Program { functions })
+
+        let entry = entry
+            .ok_or_else(|| "program is missing a START...END entry point".to_string())?;
+        Ok(Program { functions, entry })
+    }
+
+    fn parse_entry(&mut self) -> PResult<Block> {
+        self.expect(Token::Start)?;
+        let mut stmts = Vec::new();
+        while !self.check(&Token::End) {
+            stmts.push(self.parse_stmt()?);
+        }
+        self.expect(Token::End)?;
+        Ok(stmts)
     }
 
     fn parse_function(&mut self) -> PResult<Function> {
@@ -111,9 +143,12 @@ impl Parser {
             }
             Token::Print => {
                 self.advance();
-                self.expect(Token::LParen)?;
-                let value = self.parse_expr()?;
-                self.expect(Token::RParen)?;
+                self.expect(Token::Star)?;
+                // Not parse_expr(): a full expression would greedily consume
+                // the closing `*` below as a multiply operator. Restricted to
+                // a single value until `*` as multiply-vs-wrapper is resolved.
+                let value = self.parse_unary()?;
+                self.expect(Token::Star)?;
                 self.expect(Token::Semicolon)?;
                 Ok(Stmt::Print(value))
             }

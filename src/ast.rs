@@ -70,4 +70,6 @@ pub struct Function {
 #[derive(Debug, Clone)]
 pub struct Program {
     pub functions: Vec<Function>,
+    /// The statements between `START` and `END` — the program's real entry point.
+    pub entry: Block,
 }
