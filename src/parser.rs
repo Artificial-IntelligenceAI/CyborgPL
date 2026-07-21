@@ -108,15 +108,18 @@ impl Parser {
     }
 
     fn parse_stmt(&mut self) -> PResult<Stmt> {
-        // Reassignment: `name = expr;` or `'name' = expr;`, checked ahead of
-        // the main dispatch since both Ident and Quoted can start one.
-        if Self::ident_like(self.peek()).is_some() && self.peek_at(1) == Some(&Token::Eq) {
-            let name = Self::ident_like(self.peek()).unwrap();
-            self.advance();
-            self.advance();
-            let value = self.parse_expr()?;
-            self.expect(Token::Semicolon)?;
-            return Ok(Stmt::Assign(name, value));
+        // Reassignment: `'name' = expr;`, checked ahead of the main dispatch.
+        // Variable names are always quoted at reference sites now; function
+        // names (checked elsewhere) are the only identifiers left bare.
+        if let Token::Quoted(name) = self.peek() {
+            if self.peek_at(1) == Some(&Token::Eq) {
+                let name = name.clone();
+                self.advance();
+                self.advance();
+                let value = self.parse_expr()?;
+                self.expect(Token::Semicolon)?;
+                return Ok(Stmt::Assign(name, value));
+            }
         }
 
         match self.peek() {
@@ -179,15 +182,6 @@ impl Parser {
 
     fn peek_at(&self, offset: usize) -> Option<&Token> {
         self.tokens.get(self.pos + offset).map(|s| &s.token)
-    }
-
-    /// A bare or single-quoted identifier, treated interchangeably at
-    /// reference sites for now (see Token::Quoted doc comment).
-    fn ident_like(tok: &Token) -> Option<String> {
-        match tok {
-            Token::Ident(name) | Token::Quoted(name) => Some(name.clone()),
-            _ => None,
-        }
     }
 
     // Expression parsing, lowest to highest precedence:
@@ -342,26 +336,35 @@ impl Parser {
                 self.expect(Token::RParen)?;
                 Ok(expr)
             }
-            Token::Ident(name) | Token::Quoted(name) => {
+            // A bare identifier is only ever a function name, and only valid
+            // when immediately called — variable references must be quoted.
+            Token::Ident(name) => {
+                let line = self.tokens[self.pos].line;
                 self.advance();
-                if self.check(&Token::LParen) {
-                    self.advance();
-                    let mut args = Vec::new();
-                    if !self.check(&Token::RParen) {
-                        loop {
-                            args.push(self.parse_expr()?);
-                            if self.check(&Token::Comma) {
-                                self.advance();
-                            } else {
-                                break;
-                            }
+                if !self.check(&Token::LParen) {
+                    return Err(format!(
+                        "line {line}: '{name}' must be quoted as '{name}' to reference a variable \
+                         (bare names are reserved for calling functions)"
+                    ));
+                }
+                self.advance();
+                let mut args = Vec::new();
+                if !self.check(&Token::RParen) {
+                    loop {
+                        args.push(self.parse_expr()?);
+                        if self.check(&Token::Comma) {
+                            self.advance();
+                        } else {
+                            break;
                         }
                     }
-                    self.expect(Token::RParen)?;
-                    Ok(Expr::Call(name, args))
-                } else {
-                    Ok(Expr::Var(name))
                 }
+                self.expect(Token::RParen)?;
+                Ok(Expr::Call(name, args))
+            }
+            Token::Quoted(name) => {
+                self.advance();
+                Ok(Expr::Var(name))
             }
             other => Err(format!(
                 "line {}: unexpected token {:?}",

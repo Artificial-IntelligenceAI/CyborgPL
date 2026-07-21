@@ -16,25 +16,25 @@ use parser::Parser;
 // Used when no source file is given on the command line.
 const DEFAULT_SOURCE: &str = r#"
     fn add(a: num, b: num) -> num {
-        return a + b;
+        return 'a' + 'b';
     }
 
     START
         var:num 'first' = 5;
         var:num 'second' = 2.5;
-        if first < second {
-            print*add(first, second)*;
+        if 'first' < 'second' {
+            print*add('first', 'second')*;
         } else {
             print*0*;
         }
 
         var:str 'greeting' = "hello, cyborgpl";
-        print*greeting*;
+        print*'greeting'*;
 
         var:num 'i' = 0;
-        while i < 3 {
-            print*i*;
-            i = i + 1;
+        while 'i' < 3 {
+            print*'i'*;
+            'i' = 'i' + 1;
         }
     END
 "#;
