@@ -6,7 +6,7 @@ use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
 use inkwell::targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine};
 use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
-use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue, PointerValue};
+use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FloatValue, FunctionValue, PointerValue};
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel};
 
 use crate::ast::*;
@@ -18,6 +18,12 @@ pub struct Codegen<'ctx> {
     functions: HashMap<String, FunctionValue<'ctx>>,
     variables: HashMap<String, (PointerValue<'ctx>, BasicTypeEnum<'ctx>)>,
     printf_fn: FunctionValue<'ctx>,
+    /// libm's `pow`, backing both `xx` (power) and `xxx` (tetration).
+    pow_fn: FunctionValue<'ctx>,
+    /// Backs `stch` (concatenation): allocates the buffer text gets formatted into.
+    malloc_fn: FunctionValue<'ctx>,
+    /// Backs `stch` (concatenation): formats both sides into the malloc'd buffer.
+    snprintf_fn: FunctionValue<'ctx>,
 }
 
 impl<'ctx> Codegen<'ctx> {
@@ -25,10 +31,24 @@ impl<'ctx> Codegen<'ctx> {
         let module = context.create_module(module_name);
         let builder = context.create_builder();
 
-        // `print` is implemented on top of libc's printf, which we'll link in via `cc`.
+        // These are all implemented on top of libc/libm, linked in via `cc`.
         let i8_ptr = context.ptr_type(AddressSpace::default());
+        let i64_type = context.i64_type();
+        let f64_type = context.f64_type();
+
         let printf_type = context.i32_type().fn_type(&[i8_ptr.into()], true);
         let printf_fn = module.add_function("printf", printf_type, Some(Linkage::External));
+
+        let pow_type = f64_type.fn_type(&[f64_type.into(), f64_type.into()], false);
+        let pow_fn = module.add_function("pow", pow_type, Some(Linkage::External));
+
+        let malloc_type = i8_ptr.fn_type(&[i64_type.into()], false);
+        let malloc_fn = module.add_function("malloc", malloc_type, Some(Linkage::External));
+
+        let snprintf_type = context
+            .i32_type()
+            .fn_type(&[i8_ptr.into(), i64_type.into(), i8_ptr.into()], true);
+        let snprintf_fn = module.add_function("snprintf", snprintf_type, Some(Linkage::External));
 
         Codegen {
             context,
@@ -37,6 +57,9 @@ impl<'ctx> Codegen<'ctx> {
             functions: HashMap::new(),
             variables: HashMap::new(),
             printf_fn,
+            pow_fn,
+            malloc_fn,
+            snprintf_fn,
         }
     }
 
@@ -204,20 +227,8 @@ impl<'ctx> Codegen<'ctx> {
             }
             Stmt::Print(expr) => {
                 let value = self.compile_expr(expr);
-                let (fmt_str, arg): (&str, BasicMetadataValueEnum) = match value {
-                    BasicValueEnum::FloatValue(f) => ("%g\n", f.into()),
-                    BasicValueEnum::PointerValue(p) => ("%s\n", p.into()),
-                    BasicValueEnum::IntValue(i) => {
-                        // Only bools (i1) reach here; widen to i64 for printf's varargs.
-                        let widened = self
-                            .builder
-                            .build_int_z_extend(i, self.context.i64_type(), "print_ext")
-                            .unwrap();
-                        ("%lld\n", widened.into())
-                    }
-                    other => panic!("print: unsupported value {other:?}"),
-                };
-                let fmt = self.builder.build_global_string_ptr(fmt_str, "fmt").unwrap();
+                let (frag, arg) = self.value_fmt(value);
+                let fmt = self.builder.build_global_string_ptr(&format!("{frag}\n"), "fmt").unwrap();
                 self.builder
                     .build_call(self.printf_fn, &[fmt.as_pointer_value().into(), arg], "printf_call")
                     .unwrap();
@@ -302,12 +313,25 @@ impl<'ctx> Codegen<'ctx> {
             Expr::Binary(lhs, op, rhs) => {
                 let l = self.compile_expr(lhs);
                 let r = self.compile_expr(rhs);
+
+                if *op == BinOp::Concat {
+                    return self.compile_concat(l, r);
+                }
+
                 match (l, r) {
                     (BasicValueEnum::FloatValue(lf), BasicValueEnum::FloatValue(rf)) => match op {
                         BinOp::Add => self.builder.build_float_add(lf, rf, "add").unwrap().into(),
                         BinOp::Sub => self.builder.build_float_sub(lf, rf, "sub").unwrap().into(),
                         BinOp::Mul => self.builder.build_float_mul(lf, rf, "mul").unwrap().into(),
                         BinOp::Div => self.builder.build_float_div(lf, rf, "div").unwrap().into(),
+                        BinOp::Pow => self
+                            .builder
+                            .build_call(self.pow_fn, &[lf.into(), rf.into()], "pow")
+                            .unwrap()
+                            .try_as_basic_value()
+                            .basic()
+                            .unwrap(),
+                        BinOp::Tetration => self.compile_tetration(lf, rf).into(),
                         BinOp::Eq => self
                             .builder
                             .build_float_compare(FloatPredicate::OEQ, lf, rf, "eq")
@@ -339,6 +363,7 @@ impl<'ctx> Codegen<'ctx> {
                             .unwrap()
                             .into(),
                         BinOp::And | BinOp::Or => panic!("{op:?} requires bool operands, not num"),
+                        BinOp::Concat => unreachable!("handled above"),
                     },
                     (BasicValueEnum::IntValue(li), BasicValueEnum::IntValue(ri)) => match op {
                         BinOp::Eq => self.builder.build_int_compare(IntPredicate::EQ, li, ri, "eq").unwrap().into(),
@@ -360,6 +385,107 @@ impl<'ctx> Codegen<'ctx> {
                     .expect("function used in expression position must return a value")
             }
         }
+    }
+
+    /// The printf-style format fragment (no surrounding text) and matching
+    /// call argument for a compiled value. Shared by `print` and `stch`.
+    fn value_fmt(&self, value: BasicValueEnum<'ctx>) -> (&'static str, BasicMetadataValueEnum<'ctx>) {
+        match value {
+            BasicValueEnum::FloatValue(f) => ("%g", f.into()),
+            BasicValueEnum::PointerValue(p) => ("%s", p.into()),
+            BasicValueEnum::IntValue(i) => {
+                // Only bools (i1) reach here; widen to i64 for the C varargs ABI.
+                let widened = self
+                    .builder
+                    .build_int_z_extend(i, self.context.i64_type(), "fmt_ext")
+                    .unwrap();
+                ("%lld", widened.into())
+            }
+            other => panic!("unsupported value for text formatting: {other:?}"),
+        }
+    }
+
+    /// `stch`: formats both sides to text and joins them, via a malloc'd
+    /// buffer filled by snprintf (matching whatever `print` would show for
+    /// each side). The buffer is never freed — acceptable for now, but a
+    /// real memory story is still an open problem for this language.
+    fn compile_concat(&mut self, l: BasicValueEnum<'ctx>, r: BasicValueEnum<'ctx>) -> BasicValueEnum<'ctx> {
+        let (frag_l, arg_l) = self.value_fmt(l);
+        let (frag_r, arg_r) = self.value_fmt(r);
+        let fmt = self
+            .builder
+            .build_global_string_ptr(&format!("{frag_l}{frag_r}"), "concat_fmt")
+            .unwrap();
+
+        const BUF_SIZE: u64 = 256;
+        let size = self.context.i64_type().const_int(BUF_SIZE, false);
+        let buf = self
+            .builder
+            .build_call(self.malloc_fn, &[size.into()], "concat_buf")
+            .unwrap()
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_pointer_value();
+
+        self.builder
+            .build_call(
+                self.snprintf_fn,
+                &[buf.into(), size.into(), fmt.as_pointer_value().into(), arg_l, arg_r],
+                "snprintf_call",
+            )
+            .unwrap();
+
+        buf.into()
+    }
+
+    /// `xxx`: a xxx b = a ^ (a ^ (a ^ ... )) with `b` copies of `a`. `b` is
+    /// only known at runtime, so this is an actual loop (mirroring how
+    /// `while` is compiled), not a fixed chain of multiplications.
+    fn compile_tetration(&mut self, base: FloatValue<'ctx>, height: FloatValue<'ctx>) -> FloatValue<'ctx> {
+        let function = self.current_function();
+        let i64_ty = self.context.i64_type();
+        let f64_ty = self.context.f64_type();
+
+        let height_int = self.builder.build_float_to_signed_int(height, i64_ty, "tet_height").unwrap();
+
+        let result_slot = self.builder.build_alloca(f64_ty, "tet_result").unwrap();
+        self.builder.build_store(result_slot, base).unwrap();
+        let counter_slot = self.builder.build_alloca(i64_ty, "tet_i").unwrap();
+        self.builder.build_store(counter_slot, i64_ty.const_int(2, true)).unwrap();
+
+        let cond_bb = self.context.append_basic_block(function, "tet_cond");
+        let body_bb = self.context.append_basic_block(function, "tet_body");
+        let end_bb = self.context.append_basic_block(function, "tet_end");
+        self.builder.build_unconditional_branch(cond_bb).unwrap();
+
+        // height copies of `a` means (height - 1) more pow() calls after the
+        // starting value of `a`, so the counter runs from 2 up to `height`.
+        self.builder.position_at_end(cond_bb);
+        let counter = self.builder.build_load(i64_ty, counter_slot, "tet_i_load").unwrap().into_int_value();
+        let keep_going = self
+            .builder
+            .build_int_compare(IntPredicate::SLE, counter, height_int, "tet_test")
+            .unwrap();
+        self.builder.build_conditional_branch(keep_going, body_bb, end_bb).unwrap();
+
+        self.builder.position_at_end(body_bb);
+        let current = self.builder.build_load(f64_ty, result_slot, "tet_result_load").unwrap().into_float_value();
+        let next = self
+            .builder
+            .build_call(self.pow_fn, &[base.into(), current.into()], "tet_pow")
+            .unwrap()
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_float_value();
+        self.builder.build_store(result_slot, next).unwrap();
+        let counter_next = self.builder.build_int_add(counter, i64_ty.const_int(1, true), "tet_i_next").unwrap();
+        self.builder.build_store(counter_slot, counter_next).unwrap();
+        self.builder.build_unconditional_branch(cond_bb).unwrap();
+
+        self.builder.position_at_end(end_bb);
+        self.builder.build_load(f64_ty, result_slot, "tet_final").unwrap().into_float_value()
     }
 
     fn current_function(&self) -> FunctionValue<'ctx> {

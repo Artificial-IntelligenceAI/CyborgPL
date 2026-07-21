@@ -13,6 +13,8 @@ pub enum BinOp {
     Sub,
     Mul,
     Div,
+    Pow,
+    Tetration,
     Eq,
     Ne,
     Lt,
@@ -21,6 +23,8 @@ pub enum BinOp {
     Ge,
     And,
     Or,
+    /// Joins two values into text ("stch"), auto-converting non-strings.
+    Concat,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

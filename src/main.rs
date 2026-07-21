@@ -20,10 +20,10 @@ const DEFAULT_SOURCE: &str = r#"
     }
 
     START
-        var:num 'x' = 5;
-        var:num 'y' = 2.5;
-        if x < y {
-            print*add(x, y)*;
+        var:num 'first' = 5;
+        var:num 'second' = 2.5;
+        if first < second {
+            print*add(first, second)*;
         } else {
             print*0*;
         }
@@ -78,6 +78,7 @@ fn main() {
         .arg(obj_path)
         .arg("-o")
         .arg(bin_path)
+        .arg("-lm") // pow(), for xx/xxx
         .status()
         .expect("failed to invoke cc");
     if !status.success() {

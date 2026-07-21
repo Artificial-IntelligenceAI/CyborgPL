@@ -3,10 +3,10 @@ fn add(a: num, b: num) -> num {
 }
 
 START
-    var:num 'x' = 5;
-    var:num 'y' = 2.5;
-    if x < y {
-        print*add(x, y)*;
+    var:num 'first' = 5;
+    var:num 'second' = 2.5;
+    if first < second {
+        print*add(first, second)*;
     } else {
         print*0*;
     }

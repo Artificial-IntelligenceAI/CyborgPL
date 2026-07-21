@@ -144,10 +144,9 @@ impl Parser {
             Token::Print => {
                 self.advance();
                 self.expect(Token::Star)?;
-                // Not parse_expr(): a full expression would greedily consume
-                // the closing `*` below as a multiply operator. Restricted to
-                // a single value until `*` as multiply-vs-wrapper is resolved.
-                let value = self.parse_unary()?;
+                // Safe to use the full expression parser again now that `x`
+                // (not `*`) means multiply — `*` no longer conflicts with it.
+                let value = self.parse_expr()?;
                 self.expect(Token::Star)?;
                 self.expect(Token::Semicolon)?;
                 Ok(Stmt::Print(value))
@@ -192,9 +191,19 @@ impl Parser {
     }
 
     // Expression parsing, lowest to highest precedence:
-    // or -> and -> equality -> comparison -> term -> factor -> unary -> primary
+    // stch -> or -> and -> equality -> comparison -> term -> factor -> power -> unary -> primary
     fn parse_expr(&mut self) -> PResult<Expr> {
-        self.parse_or()
+        self.parse_stch()
+    }
+
+    fn parse_stch(&mut self) -> PResult<Expr> {
+        let mut left = self.parse_or()?;
+        while self.check(&Token::Stch) {
+            self.advance();
+            let right = self.parse_or()?;
+            left = Expr::Binary(Box::new(left), BinOp::Concat, Box::new(right));
+        }
+        Ok(left)
     }
 
     fn parse_or(&mut self) -> PResult<Expr> {
@@ -265,18 +274,32 @@ impl Parser {
     }
 
     fn parse_factor(&mut self) -> PResult<Expr> {
-        let mut left = self.parse_unary()?;
+        let mut left = self.parse_power()?;
         loop {
             let op = match self.peek() {
-                Token::Star => BinOp::Mul,
+                Token::Mul => BinOp::Mul,
                 Token::Slash => BinOp::Div,
                 _ => break,
             };
             self.advance();
-            let right = self.parse_unary()?;
+            let right = self.parse_power()?;
             left = Expr::Binary(Box::new(left), op, Box::new(right));
         }
         Ok(left)
+    }
+
+    /// `xx` (power) and `xxx` (tetration), right-associative and binding
+    /// tighter than `x`/`/` but looser than unary `-`/`!`.
+    fn parse_power(&mut self) -> PResult<Expr> {
+        let left = self.parse_unary()?;
+        let op = match self.peek() {
+            Token::Pow => BinOp::Pow,
+            Token::Tetration => BinOp::Tetration,
+            _ => return Ok(left),
+        };
+        self.advance();
+        let right = self.parse_power()?;
+        Ok(Expr::Binary(Box::new(left), op, Box::new(right)))
     }
 
     fn parse_unary(&mut self) -> PResult<Expr> {

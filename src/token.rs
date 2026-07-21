@@ -23,6 +23,14 @@ pub enum Token {
     /// Marks the start of the program's entry point block (replaces `fn main`).
     Start,
     End,
+    /// `x`: multiply. Replaces `*`, which is reserved for print's `*expr*` wrapper.
+    Mul,
+    /// `xx`: power/exponentiation.
+    Pow,
+    /// `xxx`: tetration (repeated exponentiation).
+    Tetration,
+    /// `stch`: concatenates two values into text ("stitch").
+    Stch,
 
     // Symbols
     LParen,
@@ -37,6 +45,7 @@ pub enum Token {
     // Operators
     Plus,
     Minus,
+    /// Only print's `*expr*` wrapper now; no longer multiply (see Mul).
     Star,
     Slash,
     Eq,      // =
@@ -67,6 +76,10 @@ impl Token {
             "print" => Some(Token::Print),
             "START" => Some(Token::Start),
             "END" => Some(Token::End),
+            "x" => Some(Token::Mul),
+            "xx" => Some(Token::Pow),
+            "xxx" => Some(Token::Tetration),
+            "stch" => Some(Token::Stch),
             _ => None,
         }
     }
