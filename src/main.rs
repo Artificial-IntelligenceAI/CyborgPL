@@ -14,20 +14,23 @@ use lexer::Lexer;
 use parser::Parser;
 
 const SOURCE: &str = r#"
-    fn add(a: int, b: int) -> int {
+    fn add(a: num, b: num) -> num {
         return a + b;
     }
 
     fn main() {
-        let x: int = 5;
-        let y: int = 10;
+        var:num 'x' = 5;
+        var:num 'y' = 2.5;
         if x < y {
             print(add(x, y));
         } else {
             print(0);
         }
 
-        let i: int = 0;
+        var:str 'greeting' = "hello, cyborgpl";
+        print('greeting');
+
+        var:num 'i' = 0;
         while i < 3 {
             print(i);
             i = i + 1;

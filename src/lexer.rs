@@ -110,6 +110,8 @@ impl<'a> Lexer<'a> {
             }
             '0'..='9' => self.lex_number(c),
             c if c.is_alphabetic() || c == '_' => self.lex_ident(c),
+            '\'' => self.lex_quoted_ident(line)?,
+            '"' => self.lex_string(line)?,
             other => return Err(format!("line {}: unexpected character '{}'", line, other)),
         };
 
@@ -127,7 +129,64 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
-        Token::Int(s.parse().expect("digit-only string must parse as i64"))
+
+        // Only consume a '.' as a decimal point if it's followed by a digit,
+        // so a bare trailing '.' is left alone rather than swallowed.
+        if self.peek_char() == Some('.') {
+            let mut lookahead = self.chars.clone();
+            lookahead.next();
+            if matches!(lookahead.peek(), Some(d) if d.is_ascii_digit()) {
+                s.push('.');
+                self.chars.next();
+                while let Some(&c) = self.chars.peek() {
+                    if c.is_ascii_digit() {
+                        s.push(c);
+                        self.chars.next();
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+
+        Token::Num(s.parse().expect("validated numeral must parse as f64"))
+    }
+
+    fn lex_quoted_ident(&mut self, line: usize) -> Result<Token, String> {
+        let mut s = String::new();
+        loop {
+            match self.chars.next() {
+                Some('\'') => break,
+                Some(ch) => s.push(ch),
+                None => return Err(format!("line {}: unterminated quoted identifier", line)),
+            }
+        }
+        let valid = matches!(s.chars().next(), Some(c) if c.is_alphabetic() || c == '_')
+            && s.chars().all(|c| c.is_alphanumeric() || c == '_');
+        if !valid {
+            return Err(format!("line {}: '{}' is not a valid identifier", line, s));
+        }
+        Ok(Token::Quoted(s))
+    }
+
+    fn lex_string(&mut self, line: usize) -> Result<Token, String> {
+        let mut s = String::new();
+        loop {
+            match self.chars.next() {
+                Some('"') => break,
+                Some('\\') => match self.chars.next() {
+                    Some('n') => s.push('\n'),
+                    Some('t') => s.push('\t'),
+                    Some('"') => s.push('"'),
+                    Some('\\') => s.push('\\'),
+                    Some(other) => s.push(other),
+                    None => return Err(format!("line {}: unterminated string literal", line)),
+                },
+                Some(ch) => s.push(ch),
+                None => return Err(format!("line {}: unterminated string literal", line)),
+            }
+        }
+        Ok(Token::Str(s))
     }
 
     fn lex_ident(&mut self, first: char) -> Token {

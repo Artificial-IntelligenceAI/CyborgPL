@@ -1,7 +1,9 @@
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Type {
-    Int,
+    /// A number, always able to hold either whole or decimal values.
+    Num,
     Bool,
+    Str,
     Void,
 }
 
@@ -29,8 +31,9 @@ pub enum UnOp {
 
 #[derive(Debug, Clone)]
 pub enum Expr {
-    Int(i64),
+    Num(f64),
     Bool(bool),
+    Str(String),
     Var(String),
     Unary(UnOp, Box<Expr>),
     Binary(Box<Expr>, BinOp, Box<Expr>),
@@ -39,7 +42,7 @@ pub enum Expr {
 
 #[derive(Debug, Clone)]
 pub enum Stmt {
-    Let(String, Type, Expr),
+    VarDecl(String, Type, Expr),
     Assign(String, Expr),
     Return(Option<Expr>),
     Print(Expr),

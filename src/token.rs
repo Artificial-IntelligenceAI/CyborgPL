@@ -1,12 +1,18 @@
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     // Literals and identifiers
-    Int(i64),
+    Num(f64),
+    Str(String),
     Ident(String),
+    /// A single-quoted identifier, e.g. 'name'. Required when declaring a
+    /// variable; also accepted (interchangeably with a bare Ident) wherever
+    /// an identifier is referenced, pending a decision on whether quoting
+    /// should be required everywhere.
+    Quoted(String),
 
     // Keywords
     Fn,
-    Let,
+    Var,
     If,
     Else,
     While,
@@ -48,7 +54,7 @@ impl Token {
     pub fn keyword_from_str(s: &str) -> Option<Token> {
         match s {
             "fn" => Some(Token::Fn),
-            "let" => Some(Token::Let),
+            "var" => Some(Token::Var),
             "if" => Some(Token::If),
             "else" => Some(Token::Else),
             "while" => Some(Token::While),

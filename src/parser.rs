@@ -58,8 +58,9 @@ impl Parser {
     fn parse_type(&mut self) -> PResult<Type> {
         let name = self.expect_ident()?;
         match name.as_str() {
-            "int" => Ok(Type::Int),
+            "num" => Ok(Type::Num),
             "bool" => Ok(Type::Bool),
+            "str" => Ok(Type::Str),
             other => Err(format!("unknown type '{other}'")),
         }
     }
@@ -75,16 +76,27 @@ impl Parser {
     }
 
     fn parse_stmt(&mut self) -> PResult<Stmt> {
+        // Reassignment: `name = expr;` or `'name' = expr;`, checked ahead of
+        // the main dispatch since both Ident and Quoted can start one.
+        if Self::ident_like(self.peek()).is_some() && self.peek_at(1) == Some(&Token::Eq) {
+            let name = Self::ident_like(self.peek()).unwrap();
+            self.advance();
+            self.advance();
+            let value = self.parse_expr()?;
+            self.expect(Token::Semicolon)?;
+            return Ok(Stmt::Assign(name, value));
+        }
+
         match self.peek() {
-            Token::Let => {
+            Token::Var => {
                 self.advance();
-                let name = self.expect_ident()?;
                 self.expect(Token::Colon)?;
                 let ty = self.parse_type()?;
+                let name = self.expect_quoted_ident()?;
                 self.expect(Token::Eq)?;
                 let value = self.parse_expr()?;
                 self.expect(Token::Semicolon)?;
-                Ok(Stmt::Let(name, ty, value))
+                Ok(Stmt::VarDecl(name, ty, value))
             }
             Token::Return => {
                 self.advance();
@@ -123,14 +135,6 @@ impl Parser {
                 let body = self.parse_block()?;
                 Ok(Stmt::While(cond, body))
             }
-            Token::Ident(name) if self.peek_at(1) == Some(&Token::Eq) => {
-                let name = name.clone();
-                self.advance();
-                self.advance();
-                let value = self.parse_expr()?;
-                self.expect(Token::Semicolon)?;
-                Ok(Stmt::Assign(name, value))
-            }
             _ => {
                 let expr = self.parse_expr()?;
                 self.expect(Token::Semicolon)?;
@@ -141,6 +145,15 @@ impl Parser {
 
     fn peek_at(&self, offset: usize) -> Option<&Token> {
         self.tokens.get(self.pos + offset).map(|s| &s.token)
+    }
+
+    /// A bare or single-quoted identifier, treated interchangeably at
+    /// reference sites for now (see Token::Quoted doc comment).
+    fn ident_like(tok: &Token) -> Option<String> {
+        match tok {
+            Token::Ident(name) | Token::Quoted(name) => Some(name.clone()),
+            _ => None,
+        }
     }
 
     // Expression parsing, lowest to highest precedence:
@@ -249,9 +262,13 @@ impl Parser {
 
     fn parse_primary(&mut self) -> PResult<Expr> {
         match self.peek().clone() {
-            Token::Int(n) => {
+            Token::Num(n) => {
                 self.advance();
-                Ok(Expr::Int(n))
+                Ok(Expr::Num(n))
+            }
+            Token::Str(s) => {
+                self.advance();
+                Ok(Expr::Str(s))
             }
             Token::True => {
                 self.advance();
@@ -267,7 +284,7 @@ impl Parser {
                 self.expect(Token::RParen)?;
                 Ok(expr)
             }
-            Token::Ident(name) => {
+            Token::Ident(name) | Token::Quoted(name) => {
                 self.advance();
                 if self.check(&Token::LParen) {
                     self.advance();
@@ -322,6 +339,19 @@ impl Parser {
                 "line {}: expected {:?}, found {:?}",
                 self.tokens[self.pos].line, expected, self.peek()
             ))
+        }
+    }
+
+    fn expect_quoted_ident(&mut self) -> PResult<String> {
+        match self.peek().clone() {
+            Token::Quoted(name) => {
+                self.advance();
+                Ok(name)
+            }
+            other => Err(format!(
+                "line {}: expected a quoted name like 'x', found {:?}",
+                self.tokens[self.pos].line, other
+            )),
         }
     }
 
