@@ -29,8 +29,6 @@ pub enum Token {
     Pow,
     /// `xxx`: tetration (repeated exponentiation).
     Tetration,
-    /// `stch`: concatenates two values into text ("stitch").
-    Stch,
 
     // Symbols
     LParen,
@@ -79,7 +77,6 @@ impl Token {
             "x" => Some(Token::Mul),
             "xx" => Some(Token::Pow),
             "xxx" => Some(Token::Tetration),
-            "stch" => Some(Token::Stch),
             _ => None,
         }
     }

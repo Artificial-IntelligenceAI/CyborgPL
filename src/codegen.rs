@@ -20,10 +20,6 @@ pub struct Codegen<'ctx> {
     printf_fn: FunctionValue<'ctx>,
     /// libm's `pow`, backing both `xx` (power) and `xxx` (tetration).
     pow_fn: FunctionValue<'ctx>,
-    /// Backs `stch` (concatenation): allocates the buffer text gets formatted into.
-    malloc_fn: FunctionValue<'ctx>,
-    /// Backs `stch` (concatenation): formats both sides into the malloc'd buffer.
-    snprintf_fn: FunctionValue<'ctx>,
 }
 
 impl<'ctx> Codegen<'ctx> {
@@ -33,7 +29,6 @@ impl<'ctx> Codegen<'ctx> {
 
         // These are all implemented on top of libc/libm, linked in via `cc`.
         let i8_ptr = context.ptr_type(AddressSpace::default());
-        let i64_type = context.i64_type();
         let f64_type = context.f64_type();
 
         let printf_type = context.i32_type().fn_type(&[i8_ptr.into()], true);
@@ -41,14 +36,6 @@ impl<'ctx> Codegen<'ctx> {
 
         let pow_type = f64_type.fn_type(&[f64_type.into(), f64_type.into()], false);
         let pow_fn = module.add_function("pow", pow_type, Some(Linkage::External));
-
-        let malloc_type = i8_ptr.fn_type(&[i64_type.into()], false);
-        let malloc_fn = module.add_function("malloc", malloc_type, Some(Linkage::External));
-
-        let snprintf_type = context
-            .i32_type()
-            .fn_type(&[i8_ptr.into(), i64_type.into(), i8_ptr.into()], true);
-        let snprintf_fn = module.add_function("snprintf", snprintf_type, Some(Linkage::External));
 
         Codegen {
             context,
@@ -58,8 +45,6 @@ impl<'ctx> Codegen<'ctx> {
             variables: HashMap::new(),
             printf_fn,
             pow_fn,
-            malloc_fn,
-            snprintf_fn,
         }
     }
 
@@ -225,13 +210,29 @@ impl<'ctx> Codegen<'ctx> {
                     }
                 };
             }
-            Stmt::Print(expr) => {
-                let value = self.compile_expr(expr);
-                let (frag, arg) = self.value_fmt(value);
-                let fmt = self.builder.build_global_string_ptr(&format!("{frag}\n"), "fmt").unwrap();
-                self.builder
-                    .build_call(self.printf_fn, &[fmt.as_pointer_value().into(), arg], "printf_call")
-                    .unwrap();
+            Stmt::Print(segments) => {
+                let mut fmt = String::new();
+                let mut args: Vec<BasicMetadataValueEnum> = Vec::new();
+                for seg in segments {
+                    match seg {
+                        // Literal text is inserted as-is, except any '%' it
+                        // contains must be escaped so printf's own format
+                        // parser doesn't mistake it for a specifier.
+                        PrintSegment::Str(s) => fmt.push_str(&s.replace('%', "%%")),
+                        PrintSegment::Expr(e) => {
+                            let value = self.compile_expr(e);
+                            let (frag, arg) = self.value_fmt(value);
+                            fmt.push_str(frag);
+                            args.push(arg);
+                        }
+                    }
+                }
+                fmt.push('\n');
+
+                let fmt_global = self.builder.build_global_string_ptr(&fmt, "fmt").unwrap();
+                let mut call_args: Vec<BasicMetadataValueEnum> = vec![fmt_global.as_pointer_value().into()];
+                call_args.extend(args);
+                self.builder.build_call(self.printf_fn, &call_args, "printf_call").unwrap();
             }
             Stmt::ExprStmt(expr) => {
                 self.compile_expr(expr);
@@ -314,10 +315,6 @@ impl<'ctx> Codegen<'ctx> {
                 let l = self.compile_expr(lhs);
                 let r = self.compile_expr(rhs);
 
-                if *op == BinOp::Concat {
-                    return self.compile_concat(l, r);
-                }
-
                 match (l, r) {
                     (BasicValueEnum::FloatValue(lf), BasicValueEnum::FloatValue(rf)) => match op {
                         BinOp::Add => self.builder.build_float_add(lf, rf, "add").unwrap().into(),
@@ -363,7 +360,6 @@ impl<'ctx> Codegen<'ctx> {
                             .unwrap()
                             .into(),
                         BinOp::And | BinOp::Or => panic!("{op:?} requires bool operands, not num"),
-                        BinOp::Concat => unreachable!("handled above"),
                     },
                     (BasicValueEnum::IntValue(li), BasicValueEnum::IntValue(ri)) => match op {
                         BinOp::Eq => self.builder.build_int_compare(IntPredicate::EQ, li, ri, "eq").unwrap().into(),
@@ -388,7 +384,8 @@ impl<'ctx> Codegen<'ctx> {
     }
 
     /// The printf-style format fragment (no surrounding text) and matching
-    /// call argument for a compiled value. Shared by `print` and `stch`.
+    /// call argument for a compiled value. Used to build print's combined
+    /// format string across all of its segments.
     fn value_fmt(&self, value: BasicValueEnum<'ctx>) -> (&'static str, BasicMetadataValueEnum<'ctx>) {
         match value {
             BasicValueEnum::FloatValue(f) => ("%g", f.into()),
@@ -403,40 +400,6 @@ impl<'ctx> Codegen<'ctx> {
             }
             other => panic!("unsupported value for text formatting: {other:?}"),
         }
-    }
-
-    /// `stch`: formats both sides to text and joins them, via a malloc'd
-    /// buffer filled by snprintf (matching whatever `print` would show for
-    /// each side). The buffer is never freed — acceptable for now, but a
-    /// real memory story is still an open problem for this language.
-    fn compile_concat(&mut self, l: BasicValueEnum<'ctx>, r: BasicValueEnum<'ctx>) -> BasicValueEnum<'ctx> {
-        let (frag_l, arg_l) = self.value_fmt(l);
-        let (frag_r, arg_r) = self.value_fmt(r);
-        let fmt = self
-            .builder
-            .build_global_string_ptr(&format!("{frag_l}{frag_r}"), "concat_fmt")
-            .unwrap();
-
-        const BUF_SIZE: u64 = 256;
-        let size = self.context.i64_type().const_int(BUF_SIZE, false);
-        let buf = self
-            .builder
-            .build_call(self.malloc_fn, &[size.into()], "concat_buf")
-            .unwrap()
-            .try_as_basic_value()
-            .basic()
-            .unwrap()
-            .into_pointer_value();
-
-        self.builder
-            .build_call(
-                self.snprintf_fn,
-                &[buf.into(), size.into(), fmt.as_pointer_value().into(), arg_l, arg_r],
-                "snprintf_call",
-            )
-            .unwrap();
-
-        buf.into()
     }
 
     /// `xxx`: a xxx b = a ^ (a ^ (a ^ ... )) with `b` copies of `a`. `b` is

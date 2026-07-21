@@ -147,12 +147,31 @@ impl Parser {
             Token::Print => {
                 self.advance();
                 self.expect(Token::Star)?;
-                // Safe to use the full expression parser again now that `x`
-                // (not `*`) means multiply — `*` no longer conflicts with it.
-                let value = self.parse_expr()?;
+                let mut segments = Vec::new();
+                loop {
+                    match self.peek().clone() {
+                        Token::Str(s) => {
+                            self.advance();
+                            segments.push(PrintSegment::Str(s));
+                        }
+                        Token::LParen => {
+                            self.advance();
+                            let value = self.parse_expr()?;
+                            self.expect(Token::RParen)?;
+                            segments.push(PrintSegment::Expr(value));
+                        }
+                        Token::Star => break,
+                        other => {
+                            return Err(format!(
+                                "line {}: expected a \"literal\", a (parenthesized value), or the closing '*', found {:?}",
+                                self.tokens[self.pos].line, other
+                            ));
+                        }
+                    }
+                }
                 self.expect(Token::Star)?;
                 self.expect(Token::Semicolon)?;
-                Ok(Stmt::Print(value))
+                Ok(Stmt::Print(segments))
             }
             Token::If => {
                 self.advance();
@@ -185,19 +204,9 @@ impl Parser {
     }
 
     // Expression parsing, lowest to highest precedence:
-    // stch -> or -> and -> equality -> comparison -> term -> factor -> power -> unary -> primary
+    // or -> and -> equality -> comparison -> term -> factor -> power -> unary -> primary
     fn parse_expr(&mut self) -> PResult<Expr> {
-        self.parse_stch()
-    }
-
-    fn parse_stch(&mut self) -> PResult<Expr> {
-        let mut left = self.parse_or()?;
-        while self.check(&Token::Stch) {
-            self.advance();
-            let right = self.parse_or()?;
-            left = Expr::Binary(Box::new(left), BinOp::Concat, Box::new(right));
-        }
-        Ok(left)
+        self.parse_or()
     }
 
     fn parse_or(&mut self) -> PResult<Expr> {

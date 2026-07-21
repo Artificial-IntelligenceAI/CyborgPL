@@ -23,17 +23,17 @@ const DEFAULT_SOURCE: &str = r#"
         var:num 'first' = 5;
         var:num 'second' = 2.5;
         if 'first' < 'second' {
-            print*add('first', 'second')*;
+            print*(add('first', 'second'))*;
         } else {
-            print*0*;
+            print*(0)*;
         }
 
         var:str 'greeting' = "hello, cyborgpl";
-        print*'greeting'*;
+        print*('greeting')*;
 
         var:num 'i' = 0;
         while 'i' < 3 {
-            print*'i'*;
+            print*('i')*;
             'i' = 'i' + 1;
         }
     END

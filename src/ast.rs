@@ -23,8 +23,6 @@ pub enum BinOp {
     Ge,
     And,
     Or,
-    /// Joins two values into text ("stch"), auto-converting non-strings.
-    Concat,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -44,12 +42,21 @@ pub enum Expr {
     Call(String, Vec<Expr>),
 }
 
+/// One piece of a `print` argument: literal text outside any parens, or a
+/// value to compute and substitute in, written inside parens to mark it as
+/// code rather than text (e.g. `print*"You have " ('apples') " apples."*;`).
+#[derive(Debug, Clone)]
+pub enum PrintSegment {
+    Str(String),
+    Expr(Expr),
+}
+
 #[derive(Debug, Clone)]
 pub enum Stmt {
     VarDecl(String, Type, Expr),
     Assign(String, Expr),
     Return(Option<Expr>),
-    Print(Expr),
+    Print(Vec<PrintSegment>),
     ExprStmt(Expr),
     If(Expr, Block, Option<Block>),
     While(Expr, Block),
