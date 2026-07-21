@@ -235,7 +235,19 @@ impl<'ctx> Codegen<'ctx> {
                 self.builder.build_call(self.printf_fn, &call_args, "printf_call").unwrap();
             }
             Stmt::ExprStmt(expr) => {
-                self.compile_expr(expr);
+                // Not compile_expr(expr): a call to a void function (the
+                // common case here -- e.g. a function that just prints) has
+                // no return value to unwrap, and compile_expr's Expr::Call
+                // arm assumes every call is used in value position and
+                // panics otherwise. A bare statement never needs the value.
+                if let Expr::Call(name, args) = expr {
+                    let function = self.functions[name];
+                    let arg_values: Vec<BasicMetadataValueEnum> =
+                        args.iter().map(|a| self.compile_expr(a).into()).collect();
+                    self.builder.build_call(function, &arg_values, "call").unwrap();
+                } else {
+                    self.compile_expr(expr);
+                }
             }
             Stmt::If(cond, then_block, else_block) => {
                 let function = self.current_function();

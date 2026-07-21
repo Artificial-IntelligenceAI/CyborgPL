@@ -157,7 +157,12 @@ impl<'a> Lexer<'a> {
         loop {
             match self.chars.next() {
                 Some('\'') => break,
-                Some(ch) => s.push(ch),
+                Some(ch) => {
+                    if ch == '\n' {
+                        self.line += 1;
+                    }
+                    s.push(ch);
+                }
                 None => return Err(format!("line {}: unterminated quoted identifier", line)),
             }
         }
@@ -179,9 +184,18 @@ impl<'a> Lexer<'a> {
                     Some('t') => s.push('\t'),
                     Some('"') => s.push('"'),
                     Some('\\') => s.push('\\'),
-                    Some(other) => s.push(other),
+                    Some(other) => {
+                        if other == '\n' {
+                            self.line += 1;
+                        }
+                        s.push(other);
+                    }
                     None => return Err(format!("line {}: unterminated string literal", line)),
                 },
+                Some('\n') => {
+                    self.line += 1;
+                    s.push('\n');
+                }
                 Some(ch) => s.push(ch),
                 None => return Err(format!("line {}: unterminated string literal", line)),
             }
