@@ -20,8 +20,26 @@ impl<'a> Lexer<'a> {
     }
 
     pub fn tokenize(mut self) -> Result<Vec<Spanned>, String> {
-        let mut tokens = Vec::new();
+        let mut tokens: Vec<Spanned> = Vec::new();
         loop {
+            // Right after `print*`, a `"` starts a raw literal: read via
+            // lex_print_literal instead of the normal escaped-string rule,
+            // so quotes inside print's own argument are just text.
+            let after_print_star = tokens.len() >= 2
+                && tokens[tokens.len() - 2].token == Token::Print
+                && tokens[tokens.len() - 1].token == Token::Star;
+
+            if after_print_star {
+                self.skip_whitespace_and_comments();
+                if self.peek_char() == Some('"') {
+                    let line = self.line;
+                    self.chars.next(); // consume opening '"'
+                    let token = self.lex_print_literal(line)?;
+                    tokens.push(Spanned { token, line });
+                    continue;
+                }
+            }
+
             let spanned = self.next_token()?;
             let is_eof = spanned.token == Token::Eof;
             tokens.push(spanned);
@@ -167,6 +185,48 @@ impl<'a> Lexer<'a> {
             return Err(format!("line {}: '{}' is not a valid identifier", line, s));
         }
         Ok(Token::Quoted(s))
+    }
+
+    /// Reads print's `"..."` argument as one raw literal: the opening `"`
+    /// is whatever the caller already consumed, and the *last* `"` seen
+    /// before the next `*` is treated as the closing one -- any quotes in
+    /// between are just literal characters, unlike a normal string literal
+    /// where the first `"` always closes it. No escape processing either;
+    /// everything between the two delimiting quotes prints exactly as
+    /// written. Mixing this with other syntax (e.g. `stch`) inside the same
+    /// print argument isn't supported -- it either gets swallowed into the
+    /// literal or reported as a trailing-content error.
+    fn lex_print_literal(&mut self, line: usize) -> Result<Token, String> {
+        let mut raw: Vec<char> = Vec::new();
+        loop {
+            match self.chars.peek().copied() {
+                Some('*') => break,
+                Some(c) => {
+                    if c == '\n' {
+                        self.line += 1;
+                    }
+                    raw.push(c);
+                    self.chars.next();
+                }
+                None => {
+                    return Err(format!("line {}: unterminated print literal (missing closing '*')", line));
+                }
+            }
+        }
+
+        let close_idx = raw
+            .iter()
+            .rposition(|&c| c == '"')
+            .ok_or_else(|| format!("line {}: print literal is missing a closing '\"'", line))?;
+
+        if !raw[close_idx + 1..].iter().all(|c| c.is_whitespace()) {
+            return Err(format!(
+                "line {}: mixing a raw print literal with other syntax after the closing '\"' isn't supported yet",
+                line
+            ));
+        }
+
+        Ok(Token::Str(raw[..close_idx].iter().collect()))
     }
 
     fn lex_string(&mut self, line: usize) -> Result<Token, String> {
