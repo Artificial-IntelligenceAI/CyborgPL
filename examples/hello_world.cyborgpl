@@ -1,5 +1,6 @@
 START
 
-print*"Hello"cut""*;
+var:num 'apples' = 74;
+print*"Hell/no/7489/988384\"\"D::fmkdjf{} " ('apples')*;
 
 END
