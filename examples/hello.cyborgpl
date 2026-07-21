@@ -1,0 +1,22 @@
+fn add(a: num, b: num) -> num {
+    return a + b;
+}
+
+fn main() {
+    var:num 'x' = 5;
+    var:num 'y' = 2.5;
+    if x < y {
+        print(add(x, y));
+    } else {
+        print(0);
+    }
+
+    var:str 'greeting' = "hello, cyborgpl";
+    print('greeting');
+
+    var:num 'i' = 0;
+    while i < 3 {
+        print(i);
+        i = i + 1;
+    }
+}

@@ -13,7 +13,8 @@ use codegen::Codegen;
 use lexer::Lexer;
 use parser::Parser;
 
-const SOURCE: &str = r#"
+// Used when no source file is given on the command line.
+const DEFAULT_SOURCE: &str = r#"
     fn add(a: num, b: num) -> num {
         return a + b;
     }
@@ -39,7 +40,16 @@ const SOURCE: &str = r#"
 "#;
 
 fn main() {
-    let tokens = Lexer::new(SOURCE).tokenize().unwrap_or_else(|e| {
+    let path = std::env::args().nth(1);
+    let source = match &path {
+        Some(path) => std::fs::read_to_string(path).unwrap_or_else(|e| {
+            eprintln!("failed to read {path}: {e}");
+            std::process::exit(1);
+        }),
+        None => DEFAULT_SOURCE.to_string(),
+    };
+
+    let tokens = Lexer::new(&source).tokenize().unwrap_or_else(|e| {
         eprintln!("lex error: {e}");
         std::process::exit(1);
     });
