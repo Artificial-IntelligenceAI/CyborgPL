@@ -61,7 +61,10 @@ fn main() {
 
     let context = Context::create();
     let mut codegen = Codegen::new(&context, "cyborgpl");
-    codegen.compile_program(&program);
+    if let Err(e) = codegen.compile_program(&program) {
+        eprintln!("codegen error: {e}");
+        std::process::exit(1);
+    }
 
     println!("--- LLVM IR ---");
     println!("{}", codegen.module().print_to_string().to_string());

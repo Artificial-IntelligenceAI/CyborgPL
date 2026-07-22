@@ -87,16 +87,16 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
-    pub fn compile_program(&mut self, program: &Program) {
+    pub fn compile_program(&mut self, program: &Program) -> Result<(), String> {
         // Declare every function signature up front so calls to functions
         // defined later in the file (or mutually recursive calls) resolve.
         for f in &program.functions {
             self.declare_function(f);
         }
         for f in &program.functions {
-            self.compile_function(f);
+            self.compile_function(f)?;
         }
-        self.compile_entry(&program.entry);
+        self.compile_entry(&program.entry)
     }
 
     fn declare_function(&mut self, f: &Function) {
@@ -116,23 +116,24 @@ impl<'ctx> Codegen<'ctx> {
 
     /// Compiles the `START...END` block into the actual `main` the C runtime
     /// calls to start the process — this is the language's real entry point.
-    fn compile_entry(&mut self, entry: &Block) {
+    fn compile_entry(&mut self, entry: &Block) -> Result<(), String> {
         let fn_type = self.context.i32_type().fn_type(&[], false);
         let function = self.module.add_function("main", fn_type, None);
         let block = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(block);
         self.variables.clear();
 
-        self.compile_block(entry);
+        self.compile_block(entry)?;
 
         let current_block = self.builder.get_insert_block().unwrap();
         if current_block.get_terminator().is_none() {
             let zero = self.context.i32_type().const_int(0, false);
             self.builder.build_return(Some(&zero)).unwrap();
         }
+        Ok(())
     }
 
-    fn compile_function(&mut self, f: &Function) {
+    fn compile_function(&mut self, f: &Function) -> Result<(), String> {
         let function = self.functions[&f.name];
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
@@ -146,7 +147,7 @@ impl<'ctx> Codegen<'ctx> {
             self.variables.insert(param.name.clone(), (alloca, ty));
         }
 
-        self.compile_block(&f.body);
+        self.compile_block(&f.body)?;
 
         // Every LLVM basic block must end in a terminator. If the source
         // fell off the end of the function without an explicit `return`,
@@ -172,37 +173,42 @@ impl<'ctx> Codegen<'ctx> {
                 }
             }
         }
+        Ok(())
     }
 
-    fn compile_block(&mut self, block: &Block) {
+    fn compile_block(&mut self, block: &Block) -> Result<(), String> {
         for stmt in block {
             // Once a block is terminated (e.g. by `return`), any further
             // statements are unreachable; don't try to emit code for them.
             if self.builder.get_insert_block().unwrap().get_terminator().is_some() {
                 break;
             }
-            self.compile_stmt(stmt);
+            self.compile_stmt(stmt)?;
         }
+        Ok(())
     }
 
-    fn compile_stmt(&mut self, stmt: &Stmt) {
+    fn compile_stmt(&mut self, stmt: &Stmt) -> Result<(), String> {
         match stmt {
             Stmt::VarDecl(name, ty, expr) => {
-                let value = self.compile_expr(expr);
+                let value = self.compile_expr(expr)?;
                 let llvm_ty = self.basic_type(*ty);
                 let alloca = self.builder.build_alloca(llvm_ty, name).unwrap();
                 self.builder.build_store(alloca, value).unwrap();
                 self.variables.insert(name.clone(), (alloca, llvm_ty));
             }
             Stmt::Assign(name, expr) => {
-                let value = self.compile_expr(expr);
-                let (ptr, _ty) = self.variables[name];
+                let value = self.compile_expr(expr)?;
+                let (ptr, _ty) = *self
+                    .variables
+                    .get(name)
+                    .ok_or_else(|| format!("undefined variable '{name}'"))?;
                 self.builder.build_store(ptr, value).unwrap();
             }
             Stmt::Return(expr) => {
                 match expr {
                     Some(e) => {
-                        let value = self.compile_expr(e);
+                        let value = self.compile_expr(e)?;
                         self.builder.build_return(Some(&value)).unwrap();
                     }
                     None => {
@@ -220,7 +226,7 @@ impl<'ctx> Codegen<'ctx> {
                         // parser doesn't mistake it for a specifier.
                         PrintSegment::Str(s) => fmt.push_str(&s.replace('%', "%%")),
                         PrintSegment::Expr(e) => {
-                            let value = self.compile_expr(e);
+                            let value = self.compile_expr(e)?;
                             let (frag, arg) = self.value_fmt(value);
                             fmt.push_str(frag);
                             args.push(arg);
@@ -241,17 +247,22 @@ impl<'ctx> Codegen<'ctx> {
                 // arm assumes every call is used in value position and
                 // panics otherwise. A bare statement never needs the value.
                 if let Expr::Call(name, args) = expr {
-                    let function = self.functions[name];
-                    let arg_values: Vec<BasicMetadataValueEnum> =
-                        args.iter().map(|a| self.compile_expr(a).into()).collect();
+                    let function = *self
+                        .functions
+                        .get(name)
+                        .ok_or_else(|| format!("undefined function '{name}'"))?;
+                    let arg_values: Vec<BasicMetadataValueEnum> = args
+                        .iter()
+                        .map(|a| self.compile_expr(a).map(Into::into))
+                        .collect::<Result<_, _>>()?;
                     self.builder.build_call(function, &arg_values, "call").unwrap();
                 } else {
-                    self.compile_expr(expr);
+                    self.compile_expr(expr)?;
                 }
             }
             Stmt::If(cond, then_block, else_block) => {
                 let function = self.current_function();
-                let cond_value = self.compile_expr(cond).into_int_value();
+                let cond_value = self.compile_expr(cond)?.into_int_value();
 
                 let then_bb = self.context.append_basic_block(function, "then");
                 let else_bb = self.context.append_basic_block(function, "else");
@@ -262,14 +273,14 @@ impl<'ctx> Codegen<'ctx> {
                     .unwrap();
 
                 self.builder.position_at_end(then_bb);
-                self.compile_block(then_block);
+                self.compile_block(then_block)?;
                 if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
                     self.builder.build_unconditional_branch(merge_bb).unwrap();
                 }
 
                 self.builder.position_at_end(else_bb);
                 if let Some(else_stmts) = else_block {
-                    self.compile_block(else_stmts);
+                    self.compile_block(else_stmts)?;
                 }
                 if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
                     self.builder.build_unconditional_branch(merge_bb).unwrap();
@@ -286,13 +297,13 @@ impl<'ctx> Codegen<'ctx> {
                 self.builder.build_unconditional_branch(cond_bb).unwrap();
 
                 self.builder.position_at_end(cond_bb);
-                let cond_value = self.compile_expr(cond).into_int_value();
+                let cond_value = self.compile_expr(cond)?.into_int_value();
                 self.builder
                     .build_conditional_branch(cond_value, body_bb, merge_bb)
                     .unwrap();
 
                 self.builder.position_at_end(body_bb);
-                self.compile_block(body);
+                self.compile_block(body)?;
                 if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
                     self.builder.build_unconditional_branch(cond_bb).unwrap();
                 }
@@ -300,19 +311,23 @@ impl<'ctx> Codegen<'ctx> {
                 self.builder.position_at_end(merge_bb);
             }
         }
+        Ok(())
     }
 
-    fn compile_expr(&mut self, expr: &Expr) -> BasicValueEnum<'ctx> {
-        match expr {
+    fn compile_expr(&mut self, expr: &Expr) -> Result<BasicValueEnum<'ctx>, String> {
+        Ok(match expr {
             Expr::Num(n) => self.context.f64_type().const_float(*n).into(),
             Expr::Bool(b) => self.context.bool_type().const_int(*b as u64, false).into(),
             Expr::Str(s) => self.builder.build_global_string_ptr(s, "str").unwrap().as_pointer_value().into(),
             Expr::Var(name) => {
-                let (ptr, ty) = self.variables[name];
+                let (ptr, ty) = *self
+                    .variables
+                    .get(name)
+                    .ok_or_else(|| format!("undefined variable '{name}'"))?;
                 self.builder.build_load(ty, ptr, name).unwrap()
             }
             Expr::Unary(op, inner) => {
-                let value = self.compile_expr(inner);
+                let value = self.compile_expr(inner)?;
                 match (op, value) {
                     (UnOp::Neg, BasicValueEnum::FloatValue(f)) => {
                         self.builder.build_float_neg(f, "neg").unwrap().into()
@@ -324,8 +339,8 @@ impl<'ctx> Codegen<'ctx> {
                 }
             }
             Expr::Binary(lhs, op, rhs) => {
-                let l = self.compile_expr(lhs);
-                let r = self.compile_expr(rhs);
+                let l = self.compile_expr(lhs)?;
+                let r = self.compile_expr(rhs)?;
 
                 match (l, r) {
                     (BasicValueEnum::FloatValue(lf), BasicValueEnum::FloatValue(rf)) => match op {
@@ -384,15 +399,20 @@ impl<'ctx> Codegen<'ctx> {
                 }
             }
             Expr::Call(name, args) => {
-                let function = self.functions[name];
-                let arg_values: Vec<BasicMetadataValueEnum> =
-                    args.iter().map(|a| self.compile_expr(a).into()).collect();
+                let function = *self
+                    .functions
+                    .get(name)
+                    .ok_or_else(|| format!("undefined function '{name}'"))?;
+                let arg_values: Vec<BasicMetadataValueEnum> = args
+                    .iter()
+                    .map(|a| self.compile_expr(a).map(Into::into))
+                    .collect::<Result<_, _>>()?;
                 let call = self.builder.build_call(function, &arg_values, "call").unwrap();
                 call.try_as_basic_value()
                     .basic()
                     .expect("function used in expression position must return a value")
             }
-        }
+        })
     }
 
     /// The printf-style format fragment (no surrounding text) and matching

@@ -1,0 +1,8 @@
+START
+
+var:num 'apples' = 74;
+var:bool 'great_language' = true;
+print*"Hell/no/7489/988384\"wsp\"D::fmkdjf{🫪}😂😈 " ('apples') " 🦅🫆"*;
+print*('great_language')*;
+
+END
