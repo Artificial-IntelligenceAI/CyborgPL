@@ -2,8 +2,11 @@ START
 
 var:str 'emoji-store😂' = "⚫️💀";
 var:num 'apples' = 74;
+var:str 'apples' = "a fruit";
+var:bool 'apples' = true;
 var:bool 'great_language???' = true;
 print*"Hell/no/7489/988384\"wsp\"D::fmkdjf{🫪}😂😈 " (ref:var:num 'apples') " 🦅🫆" (ref:var:str 'emoji-store😂')*;
 print*(ref:var:bool 'great_language???')*;
+print*"apples as num: " (ref:var:num 'apples') ", as str: " (ref:var:str 'apples') ", as bool: " (ref:var:bool 'apples')*;
 
 END
