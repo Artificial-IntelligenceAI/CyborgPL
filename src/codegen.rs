@@ -16,7 +16,10 @@ pub struct Codegen<'ctx> {
     module: Module<'ctx>,
     builder: Builder<'ctx>,
     functions: HashMap<String, FunctionValue<'ctx>>,
-    variables: HashMap<String, (PointerValue<'ctx>, BasicTypeEnum<'ctx>)>,
+    /// Keyed by (name, type) rather than just name, so a name can be shared
+    /// by variables of different types -- ref:var:TYPE 'name' picks between
+    /// them by type at each reference site.
+    variables: HashMap<(String, Type), (PointerValue<'ctx>, BasicTypeEnum<'ctx>)>,
     printf_fn: FunctionValue<'ctx>,
     /// libm's `pow`, backing both `xx` (power) and `xxx` (tetration).
     pow_fn: FunctionValue<'ctx>,
@@ -144,7 +147,7 @@ impl<'ctx> Codegen<'ctx> {
             let ty = self.basic_type(param.ty);
             let alloca = self.builder.build_alloca(ty, &param.name).unwrap();
             self.builder.build_store(alloca, value).unwrap();
-            self.variables.insert(param.name.clone(), (alloca, ty));
+            self.variables.insert((param.name.clone(), param.ty), (alloca, ty));
         }
 
         self.compile_block(&f.body)?;
@@ -195,14 +198,14 @@ impl<'ctx> Codegen<'ctx> {
                 let llvm_ty = self.basic_type(*ty);
                 let alloca = self.builder.build_alloca(llvm_ty, name).unwrap();
                 self.builder.build_store(alloca, value).unwrap();
-                self.variables.insert(name.clone(), (alloca, llvm_ty));
+                self.variables.insert((name.clone(), *ty), (alloca, llvm_ty));
             }
-            Stmt::Assign(name, expr) => {
+            Stmt::Assign(name, ty, expr) => {
                 let value = self.compile_expr(expr)?;
                 let (ptr, _ty) = *self
                     .variables
-                    .get(name)
-                    .ok_or_else(|| format!("undefined variable '{name}'"))?;
+                    .get(&(name.clone(), *ty))
+                    .ok_or_else(|| format!("undefined variable '{name}' of type {ty:?}"))?;
                 self.builder.build_store(ptr, value).unwrap();
             }
             Stmt::Return(expr) => {
@@ -319,12 +322,12 @@ impl<'ctx> Codegen<'ctx> {
             Expr::Num(n) => self.context.f64_type().const_float(*n).into(),
             Expr::Bool(b) => self.context.bool_type().const_int(*b as u64, false).into(),
             Expr::Str(s) => self.builder.build_global_string_ptr(s, "str").unwrap().as_pointer_value().into(),
-            Expr::Var(name) => {
-                let (ptr, ty) = *self
+            Expr::Var(name, ty) => {
+                let (ptr, llvm_ty) = *self
                     .variables
-                    .get(name)
-                    .ok_or_else(|| format!("undefined variable '{name}'"))?;
-                self.builder.build_load(ty, ptr, name).unwrap()
+                    .get(&(name.clone(), *ty))
+                    .ok_or_else(|| format!("undefined variable '{name}' of type {ty:?}"))?;
+                self.builder.build_load(llvm_ty, ptr, name).unwrap()
             }
             Expr::Unary(op, inner) => {
                 let value = self.compile_expr(inner)?;

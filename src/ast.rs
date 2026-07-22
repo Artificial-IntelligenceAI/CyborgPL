@@ -1,4 +1,4 @@
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Type {
     /// A number, always able to hold either whole or decimal values.
     Num,
@@ -36,7 +36,10 @@ pub enum Expr {
     Num(f64),
     Bool(bool),
     Str(String),
-    Var(String),
+    /// A variable reference: `ref:var:TYPE 'name'`. Carries the type stated
+    /// at the reference site, since a name can now be shared by variables
+    /// of different types -- the type is what tells them apart.
+    Var(String, Type),
     Unary(UnOp, Box<Expr>),
     Binary(Box<Expr>, BinOp, Box<Expr>),
     Call(String, Vec<Expr>),
@@ -54,7 +57,7 @@ pub enum PrintSegment {
 #[derive(Debug, Clone)]
 pub enum Stmt {
     VarDecl(String, Type, Expr),
-    Assign(String, Expr),
+    Assign(String, Type, Expr),
     Return(Option<Expr>),
     Print(Vec<PrintSegment>),
     ExprStmt(Expr),

@@ -129,7 +129,7 @@ impl Parser {
                 let line = self.tokens[self.pos].line;
                 let expr = self.parse_expr()?;
                 if self.check(&Token::Eq) {
-                    let Expr::Var(name) = expr else {
+                    let Expr::Var(name, ty) = expr else {
                         return Err(format!(
                             "line {line}: left side of '=' must be a plain ref:var:TYPE 'name'"
                         ));
@@ -137,7 +137,7 @@ impl Parser {
                     self.advance();
                     let value = self.parse_expr()?;
                     self.expect(Token::Semicolon)?;
-                    return Ok(Stmt::Assign(name, value));
+                    return Ok(Stmt::Assign(name, ty, value));
                 }
                 self.expect(Token::Semicolon)?;
                 Ok(Stmt::ExprStmt(expr))
@@ -351,16 +351,16 @@ impl Parser {
                 Ok(expr)
             }
             // `ref:var:TYPE 'name'` is the only way to read a variable's
-            // value now. The type is parsed but not enforced (there's no
-            // type checker yet) -- it's documentation at the reference site.
+            // value now. The type is which variable named 'name' this is --
+            // the same name can be shared by variables of different types.
             Token::Ref => {
                 self.advance();
                 self.expect(Token::Colon)?;
                 self.expect(Token::Var)?;
                 self.expect(Token::Colon)?;
-                let _ty = self.parse_type()?;
+                let ty = self.parse_type()?;
                 let name = self.expect_quoted_ident()?;
-                Ok(Expr::Var(name))
+                Ok(Expr::Var(name, ty))
             }
             // A quoted name is only ever a function name now, and only valid
             // when immediately called with '(' -- plain 'name' alone isn't
