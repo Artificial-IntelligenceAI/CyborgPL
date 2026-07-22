@@ -4,15 +4,16 @@ pub enum Token {
     Num(f64),
     Str(String),
     Ident(String),
-    /// A single-quoted identifier, e.g. 'name'. Required when declaring a
-    /// variable; also accepted (interchangeably with a bare Ident) wherever
-    /// an identifier is referenced, pending a decision on whether quoting
-    /// should be required everywhere.
+    /// A single-quoted name, e.g. 'name'. Any character is allowed inside
+    /// (except a literal `'`, which always closes it). Used for variable
+    /// names, function names, and parameter names alike.
     Quoted(String),
 
     // Keywords
     Fn,
     Var,
+    /// Starts a variable reference: `ref:var:TYPE 'name'`.
+    Ref,
     If,
     Else,
     While,
@@ -65,6 +66,7 @@ impl Token {
         match s {
             "fn" => Some(Token::Fn),
             "var" => Some(Token::Var),
+            "ref" => Some(Token::Ref),
             "if" => Some(Token::If),
             "else" => Some(Token::Else),
             "while" => Some(Token::While),

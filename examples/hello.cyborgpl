@@ -1,22 +1,22 @@
-fn add(a: num, b: num) -> num {
-    return 'a' + 'b';
+fn 'add'('a': num, 'b': num) -> num {
+    return ref:var:num 'a' + ref:var:num 'b';
 }
 
 START
     var:num 'first' = 5;
     var:num 'second' = 2.5;
-    if 'first' < 'second' {
-        print*(add('first', 'second'))*;
+    if ref:var:num 'first' < ref:var:num 'second' {
+        print*('add'(ref:var:num 'first', ref:var:num 'second'))*;
     } else {
         print*(0)*;
     }
 
     var:str 'greeting' = "hello, cyborgpl";
-    print*('greeting')*;
+    print*(ref:var:str 'greeting')*;
 
     var:num 'i' = 0;
-    while 'i' < 3 {
-        print*('i')*;
-        'i' = 'i' + 1;
+    while ref:var:num 'i' < 3 {
+        print*(ref:var:num 'i')*;
+        ref:var:num 'i' = ref:var:num 'i' + 1;
     }
 END

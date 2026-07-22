@@ -152,6 +152,9 @@ impl<'a> Lexer<'a> {
         Token::Num(s.parse().expect("validated numeral must parse as f64"))
     }
 
+    /// Any character is allowed between the quotes (a deliberate choice --
+    /// there's no character-set restriction on names anymore), except a
+    /// literal `'`, which always closes it.
     fn lex_quoted_ident(&mut self, line: usize) -> Result<Token, String> {
         let mut s = String::new();
         loop {
@@ -165,11 +168,6 @@ impl<'a> Lexer<'a> {
                 }
                 None => return Err(format!("line {}: unterminated quoted identifier", line)),
             }
-        }
-        let valid = matches!(s.chars().next(), Some(c) if c.is_alphabetic() || c == '_')
-            && s.chars().all(|c| c.is_alphanumeric() || c == '_');
-        if !valid {
-            return Err(format!("line {}: '{}' is not a valid identifier", line, s));
         }
         Ok(Token::Quoted(s))
     }

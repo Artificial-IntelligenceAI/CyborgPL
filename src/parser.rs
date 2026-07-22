@@ -56,13 +56,13 @@ impl Parser {
 
     fn parse_function(&mut self) -> PResult<Function> {
         self.expect(Token::Fn)?;
-        let name = self.expect_ident()?;
+        let name = self.expect_quoted_ident()?;
         self.expect(Token::LParen)?;
 
         let mut params = Vec::new();
         if !self.check(&Token::RParen) {
             loop {
-                let pname = self.expect_ident()?;
+                let pname = self.expect_quoted_ident()?;
                 self.expect(Token::Colon)?;
                 let ty = self.parse_type()?;
                 params.push(Param { name: pname, ty });
@@ -108,20 +108,6 @@ impl Parser {
     }
 
     fn parse_stmt(&mut self) -> PResult<Stmt> {
-        // Reassignment: `'name' = expr;`, checked ahead of the main dispatch.
-        // Variable names are always quoted at reference sites now; function
-        // names (checked elsewhere) are the only identifiers left bare.
-        if let Token::Quoted(name) = self.peek() {
-            if self.peek_at(1) == Some(&Token::Eq) {
-                let name = name.clone();
-                self.advance();
-                self.advance();
-                let value = self.parse_expr()?;
-                self.expect(Token::Semicolon)?;
-                return Ok(Stmt::Assign(name, value));
-            }
-        }
-
         match self.peek() {
             Token::Var => {
                 self.advance();
@@ -132,6 +118,29 @@ impl Parser {
                 let value = self.parse_expr()?;
                 self.expect(Token::Semicolon)?;
                 Ok(Stmt::VarDecl(name, ty, value))
+            }
+            Token::Ref => {
+                // Either a reassignment (`ref:var:TYPE 'name' = expr;`) or a
+                // bare variable reference used as a statement on its own.
+                // `ref:var:TYPE 'name'` parses as a plain Expr::Var, and `=`
+                // isn't part of any expression grammar rule, so parse_expr
+                // naturally stops right where we need to check for it --
+                // no backtracking required.
+                let line = self.tokens[self.pos].line;
+                let expr = self.parse_expr()?;
+                if self.check(&Token::Eq) {
+                    let Expr::Var(name) = expr else {
+                        return Err(format!(
+                            "line {line}: left side of '=' must be a plain ref:var:TYPE 'name'"
+                        ));
+                    };
+                    self.advance();
+                    let value = self.parse_expr()?;
+                    self.expect(Token::Semicolon)?;
+                    return Ok(Stmt::Assign(name, value));
+                }
+                self.expect(Token::Semicolon)?;
+                Ok(Stmt::ExprStmt(expr))
             }
             Token::Return => {
                 self.advance();
@@ -197,10 +206,6 @@ impl Parser {
                 Ok(Stmt::ExprStmt(expr))
             }
         }
-    }
-
-    fn peek_at(&self, offset: usize) -> Option<&Token> {
-        self.tokens.get(self.pos + offset).map(|s| &s.token)
     }
 
     // Expression parsing, lowest to highest precedence:
@@ -345,15 +350,28 @@ impl Parser {
                 self.expect(Token::RParen)?;
                 Ok(expr)
             }
-            // A bare identifier is only ever a function name, and only valid
-            // when immediately called — variable references must be quoted.
-            Token::Ident(name) => {
+            // `ref:var:TYPE 'name'` is the only way to read a variable's
+            // value now. The type is parsed but not enforced (there's no
+            // type checker yet) -- it's documentation at the reference site.
+            Token::Ref => {
+                self.advance();
+                self.expect(Token::Colon)?;
+                self.expect(Token::Var)?;
+                self.expect(Token::Colon)?;
+                let _ty = self.parse_type()?;
+                let name = self.expect_quoted_ident()?;
+                Ok(Expr::Var(name))
+            }
+            // A quoted name is only ever a function name now, and only valid
+            // when immediately called with '(' -- plain 'name' alone isn't
+            // a variable reference anymore (that's ref:var:TYPE 'name').
+            Token::Quoted(name) => {
                 let line = self.tokens[self.pos].line;
                 self.advance();
                 if !self.check(&Token::LParen) {
                     return Err(format!(
-                        "line {line}: '{name}' must be quoted as '{name}' to reference a variable \
-                         (bare names are reserved for calling functions)"
+                        "line {line}: '{name}' alone isn't a variable reference anymore -- \
+                         use ref:var:TYPE '{name}', or '{name}(' to call it as a function"
                     ));
                 }
                 self.advance();
@@ -370,10 +388,6 @@ impl Parser {
                 }
                 self.expect(Token::RParen)?;
                 Ok(Expr::Call(name, args))
-            }
-            Token::Quoted(name) => {
-                self.advance();
-                Ok(Expr::Var(name))
             }
             other => Err(format!(
                 "line {}: unexpected token {:?}",
