@@ -423,12 +423,18 @@ impl<'ctx> Codegen<'ctx> {
             BasicValueEnum::FloatValue(f) => ("%g", f.into()),
             BasicValueEnum::PointerValue(p) => ("%s", p.into()),
             BasicValueEnum::IntValue(i) => {
-                // Only bools (i1) reach here; widen to i64 for the C varargs ABI.
-                let widened = self
+                // Only bools (i1) reach here. The actual value is only known
+                // at runtime (it could come from a comparison, a variable,
+                // anything), so picking "true" vs "false" text needs a
+                // runtime select between the two string constants, not a
+                // compile-time choice.
+                let true_str = self.builder.build_global_string_ptr("true", "true_str").unwrap();
+                let false_str = self.builder.build_global_string_ptr("false", "false_str").unwrap();
+                let chosen = self
                     .builder
-                    .build_int_z_extend(i, self.context.i64_type(), "fmt_ext")
+                    .build_select(i, true_str.as_pointer_value(), false_str.as_pointer_value(), "bool_str")
                     .unwrap();
-                ("%lld", widened.into())
+                ("%s", chosen.into())
             }
             other => panic!("unsupported value for text formatting: {other:?}"),
         }

@@ -1,8 +1,9 @@
 START
 
+var:str 'emoji-store😂' = "⚫️💀";
 var:num 'apples' = 74;
-var:bool 'great_language' = true;
-print*"Hell/no/7489/988384\"wsp\"D::fmkdjf{🫪}😂😈 " (ref:var:num 'apples') " 🦅🫆"*;
-print*(ref:var:bool 'great_language')*;
+var:bool 'great_language???' = true;
+print*"Hell/no/7489/988384\"wsp\"D::fmkdjf{🫪}😂😈 " (ref:var:num 'apples') " 🦅🫆" (ref:var:str 'emoji-store😂')*;
+print*(ref:var:bool 'great_language???')*;
 
 END
