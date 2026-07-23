@@ -23,6 +23,10 @@ struct BignumFns<'ctx> {
     div: FunctionValue<'ctx>,
     to_string: FunctionValue<'ctx>,
     free: FunctionValue<'ctx>,
+    pow: FunctionValue<'ctx>,
+    /// Truncates a bignum to a native i64 -- used to turn a tetration
+    /// height into a loop trip count.
+    get_i64: FunctionValue<'ctx>,
 }
 
 /// One entry per variable declared directly in a block, remembering
@@ -142,6 +146,16 @@ impl<'ctx> Codegen<'ctx> {
             free: module.add_function(
                 "bignum_free",
                 void_ty.fn_type(&[i8_ptr.into()], false),
+                Some(Linkage::External),
+            ),
+            pow: module.add_function(
+                "bignum_pow",
+                void_ty.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            ),
+            get_i64: module.add_function(
+                "bignum_get_i64",
+                i64_ty.fn_type(&[i8_ptr.into()], false),
                 Some(Linkage::External),
             ),
         };
@@ -821,12 +835,24 @@ impl<'ctx> Codegen<'ctx> {
                     // fresh handle at *that* variable's declared precision),
                     // but an intermediate expression used elsewhere won't
                     // retroactively regain precision this step didn't have.
+                    (BasicValueEnum::StructValue(_), BasicValueEnum::StructValue(_)) if op == &BinOp::Tetration => {
+                        let lp = self.unwrap_bignum_ptr(l);
+                        let rp = self.unwrap_bignum_ptr(r);
+                        let dst = self.compile_bignum_tetration(lp, rp);
+                        // Same reasoning as the shim_fn arm below: nothing
+                        // adopts this handle, so it's registered for the
+                        // enclosing statement to free once it's done with it.
+                        let wrapped = self.wrap_bignum_ptr(dst);
+                        self.bignum_temps.push((dst, wrapped));
+                        wrapped
+                    }
                     (BasicValueEnum::StructValue(_), BasicValueEnum::StructValue(_)) => {
                         let shim_fn = match op {
                             BinOp::Add => self.bignum.add,
                             BinOp::Sub => self.bignum.sub,
                             BinOp::Mul => self.bignum.mul,
                             BinOp::Div => self.bignum.div,
+                            BinOp::Pow => self.bignum.pow,
                             _ => panic!("{op:?} not supported on bignum yet"),
                         };
                         let lp = self.unwrap_bignum_ptr(l);
@@ -948,6 +974,65 @@ impl<'ctx> Codegen<'ctx> {
 
         self.builder.position_at_end(end_bb);
         self.builder.build_load(f64_ty, result_slot, "tet_final").unwrap().into_float_value()
+    }
+
+    /// bignum's `xxx`, same shape as `compile_tetration` above (a runtime
+    /// loop, since height is only known at runtime) but using bignum_pow
+    /// at each step instead of libm's pow. Unlike num's version, each
+    /// step's destination is a fresh heap handle, so the *previous* step's
+    /// handle has to be explicitly freed before it's overwritten -- left
+    /// unfreed, this would leak once per tetration step, the same class
+    /// of bug the scope-based cleanup elsewhere fixed for named variables.
+    /// Returns a raw (unwrapped) handle, matching how the plain shim_fn
+    /// arm hands its `dst` back to the caller to wrap once.
+    fn compile_bignum_tetration(&mut self, base: PointerValue<'ctx>, height: PointerValue<'ctx>) -> PointerValue<'ctx> {
+        let function = self.current_function();
+        let i64_ty = self.context.i64_type();
+        let bignum_ty = self.bignum_struct_type();
+
+        let height_int = self
+            .builder
+            .build_call(self.bignum.get_i64, &[height.into()], "tet_bignum_height")
+            .unwrap()
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_int_value();
+
+        let initial = self.bignum_new(DEFAULT_BIGNUM_PRECISION);
+        self.builder.build_call(self.bignum.copy, &[initial.into(), base.into()], "tet_bignum_init_copy").unwrap();
+        let result_slot = self.builder.build_alloca(bignum_ty, "tet_bignum_result").unwrap();
+        self.builder.build_store(result_slot, self.wrap_bignum_ptr(initial)).unwrap();
+        let counter_slot = self.builder.build_alloca(i64_ty, "tet_bignum_i").unwrap();
+        self.builder.build_store(counter_slot, i64_ty.const_int(2, true)).unwrap();
+
+        let cond_bb = self.context.append_basic_block(function, "tet_bignum_cond");
+        let body_bb = self.context.append_basic_block(function, "tet_bignum_body");
+        let end_bb = self.context.append_basic_block(function, "tet_bignum_end");
+        self.builder.build_unconditional_branch(cond_bb).unwrap();
+
+        self.builder.position_at_end(cond_bb);
+        let counter = self.builder.build_load(i64_ty, counter_slot, "tet_bignum_i_load").unwrap().into_int_value();
+        let keep_going = self
+            .builder
+            .build_int_compare(IntPredicate::SLE, counter, height_int, "tet_bignum_test")
+            .unwrap();
+        self.builder.build_conditional_branch(keep_going, body_bb, end_bb).unwrap();
+
+        self.builder.position_at_end(body_bb);
+        let current_wrapped = self.builder.build_load(bignum_ty, result_slot, "tet_bignum_result_load").unwrap();
+        let current_ptr = self.unwrap_bignum_ptr(current_wrapped);
+        let next = self.bignum_new(DEFAULT_BIGNUM_PRECISION);
+        self.builder.build_call(self.bignum.pow, &[next.into(), base.into(), current_ptr.into()], "tet_bignum_pow").unwrap();
+        self.free_bignum_ptr(current_ptr);
+        self.builder.build_store(result_slot, self.wrap_bignum_ptr(next)).unwrap();
+        let counter_next = self.builder.build_int_add(counter, i64_ty.const_int(1, true), "tet_bignum_i_next").unwrap();
+        self.builder.build_store(counter_slot, counter_next).unwrap();
+        self.builder.build_unconditional_branch(cond_bb).unwrap();
+
+        self.builder.position_at_end(end_bb);
+        let final_wrapped = self.builder.build_load(bignum_ty, result_slot, "tet_bignum_final").unwrap();
+        self.unwrap_bignum_ptr(final_wrapped)
     }
 
     fn current_function(&self) -> FunctionValue<'ctx> {

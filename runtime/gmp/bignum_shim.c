@@ -48,6 +48,37 @@ void bignum_div(void *dst, void *a, void *b) {
     mpf_div(*(mpf_t *)dst, *(mpf_t *)a, *(mpf_t *)b);
 }
 
+// GMP's mpf_t has no general pow(): mpf_pow_ui only takes a non-negative
+// integer exponent (its own real limitation, not a shortcut taken here).
+// Negative integer exponents are handled via reciprocal (base^-n = 1/base^n);
+// a fractional exponent's fractional part is silently truncated, same as
+// how num's own tetration height is truncated to an integer already.
+void bignum_pow(void *dst, void *base, void *exp) {
+    mpf_srcptr e = *(mpf_t *)exp;
+    mpf_t abs_e;
+    mpf_init(abs_e);
+    mpf_abs(abs_e, e);
+    unsigned long exp_ui = mpf_get_ui(abs_e);
+    mpf_clear(abs_e);
+
+    mpf_pow_ui(*(mpf_t *)dst, *(mpf_t *)base, exp_ui);
+
+    if (mpf_sgn(e) < 0) {
+        mpf_t one;
+        mpf_init2(one, mpf_get_prec(*(mpf_t *)dst));
+        mpf_set_ui(one, 1);
+        mpf_div(*(mpf_t *)dst, one, *(mpf_t *)dst);
+        mpf_clear(one);
+    }
+}
+
+// Truncates to a native signed integer -- used to turn a bignum tetration
+// height into a loop trip count, the same role build_float_to_signed_int
+// plays for num's tetration.
+long bignum_get_i64(void *x) {
+    return mpf_get_si(*(mpf_t *)x);
+}
+
 void bignum_free(void *x) {
     mpf_clear(*(mpf_t *)x);
     free(x);
