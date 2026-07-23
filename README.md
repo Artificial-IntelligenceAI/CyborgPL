@@ -38,7 +38,7 @@ Running with no file argument compiles a small built-in demo instead:
 cargo run
 ```
 
-## Example
+## Examples
 
 ```
 fn 'add'('a': num, 'b': num) -> num {
@@ -52,6 +52,21 @@ START
 
     var:bignum 'big' = "3.14159265358979323846264338327950288419716939937510582097494459230781640628620899862803482534211706798214808651328230664709384460955058223172535940812848111745028410270193852110555964462294895493038196";
     print*"pi to 200 digits: " (ref:var:bignum 'big')*;
+END
+```
+
+[`examples/chaos_print.cyborgpl`](examples/chaos_print.cyborgpl) stress-tests `print` in a single call — escaped quotes/tabs, emoji in both literal text and variable names, all four types, and the `xx`/`xxx` operators:
+
+```
+START
+
+var:num 'apples🍎' = 42;
+var:str 'weird_str' = "spécial \tvalue\n with \\backslash\\ and a 100% discount";
+var:bool 'is_chaotic?!' = true;
+var:bignum 'huge💥' = "31415926535897932384626433832795028841971693993751";
+
+print*"Chaos test: \"quoted\", tab:\there, newline-escaped-below" (ref:var:str 'weird_str') "|| 🍎🔥💀 emoji-in-text || num=" (ref:var:num 'apples🍎') " || bool=" (ref:var:bool 'is_chaotic?!') " || bignum=" (ref:var:bignum 'huge💥') " || (num xx 2) x 3 + num xxx 2 = " ((ref:var:num 'apples🍎' xx 2) x 3 + ref:var:num 'apples🍎' xxx 2) " || 100% done."*;
+
 END
 ```
 
