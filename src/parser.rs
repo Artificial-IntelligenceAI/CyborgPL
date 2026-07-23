@@ -93,16 +93,19 @@ impl Parser {
             "num" => Ok(Type::Num(DEFAULT_NUM_PRECISION)),
             "bool" => Ok(Type::Bool),
             "str" => Ok(Type::Str),
+            "bignum" => Ok(Type::BigNum(DEFAULT_BIGNUM_PRECISION)),
             other => Err(format!("unknown type '{other}'")),
         }
     }
 
-    /// Parses an optional `[precision:N]` suffix (N one of 16/32/64/128),
-    /// returning the width if present. Only meaningful on `num` -- caller is
-    /// responsible for rejecting it on other types.
-    fn parse_optional_precision(&mut self) -> PResult<Option<u32>> {
+    /// Parses an optional `[precision:N]` suffix and applies it to `ty` if
+    /// present, returning `ty` unchanged otherwise. Validated per-type:
+    /// `num` only accepts 16/32/64/128 (real hardware float widths);
+    /// `bignum` accepts any positive whole number of bits (GMP doesn't
+    /// care, it's not tied to a hardware format).
+    fn parse_optional_precision(&mut self, ty: Type) -> PResult<Type> {
         if !self.check(&Token::LBracket) {
-            return Ok(None);
+            return Ok(ty);
         }
         self.advance();
         let line = self.tokens[self.pos].line;
@@ -111,19 +114,32 @@ impl Parser {
             return Err(format!("line {line}: expected 'precision', found '{word}'"));
         }
         self.expect(Token::Colon)?;
-        let width = match self.peek().clone() {
-            Token::Num(n) if [16.0, 32.0, 64.0, 128.0].contains(&n) => {
+        let n = match self.peek().clone() {
+            Token::Num(n) => {
                 self.advance();
-                n as u32
+                n
             }
-            other => {
-                return Err(format!(
-                    "line {line}: expected a precision of 16, 32, 64, or 128, found {other:?}"
-                ));
-            }
+            other => return Err(format!("line {line}: expected a precision number, found {other:?}")),
         };
         self.expect(Token::RBracket)?;
-        Ok(Some(width))
+
+        match ty {
+            Type::Num(_) => {
+                if ![16.0, 32.0, 64.0, 128.0].contains(&n) {
+                    return Err(format!("line {line}: num precision must be 16, 32, 64, or 128, found {n}"));
+                }
+                Ok(Type::Num(n as u32))
+            }
+            Type::BigNum(_) => {
+                if n < 1.0 || n.fract() != 0.0 {
+                    return Err(format!(
+                        "line {line}: bignum precision must be a positive whole number of bits, found {n}"
+                    ));
+                }
+                Ok(Type::BigNum(n as u32))
+            }
+            _ => Err(format!("line {line}: [precision:N] only applies to num or bignum, not {ty:?}")),
+        }
     }
 
     fn parse_block(&mut self) -> PResult<Block> {
@@ -139,19 +155,13 @@ impl Parser {
     fn parse_stmt(&mut self) -> PResult<Stmt> {
         match self.peek() {
             Token::Var => {
-                let line = self.tokens[self.pos].line;
                 self.advance();
                 self.expect(Token::Colon)?;
-                let mut ty = self.parse_type()?;
+                let ty = self.parse_type()?;
                 let name = self.expect_quoted_ident()?;
                 self.expect(Token::Eq)?;
                 let value = self.parse_expr()?;
-                if let Some(width) = self.parse_optional_precision()? {
-                    match ty {
-                        Type::Num(_) => ty = Type::Num(width),
-                        _ => return Err(format!("line {line}: [precision:N] only applies to num, not {ty:?}")),
-                    }
-                }
+                let ty = self.parse_optional_precision(ty)?;
                 self.expect(Token::Semicolon)?;
                 Ok(Stmt::VarDecl(name, ty, value))
             }
@@ -390,18 +400,12 @@ impl Parser {
             // value now. The type is which variable named 'name' this is --
             // the same name can be shared by variables of different types.
             Token::Ref => {
-                let line = self.tokens[self.pos].line;
                 self.advance();
                 self.expect(Token::Colon)?;
                 self.expect(Token::Var)?;
                 self.expect(Token::Colon)?;
-                let mut ty = self.parse_type()?;
-                if let Some(width) = self.parse_optional_precision()? {
-                    match ty {
-                        Type::Num(_) => ty = Type::Num(width),
-                        _ => return Err(format!("line {line}: [precision:N] only applies to num, not {ty:?}")),
-                    }
-                }
+                let ty = self.parse_type()?;
+                let ty = self.parse_optional_precision(ty)?;
                 let name = self.expect_quoted_ident()?;
                 Ok(Expr::Var(name, ty))
             }

@@ -8,10 +8,17 @@ pub enum Type {
     Num(u32),
     Bool,
     Str,
+    /// Arbitrary-precision decimal (GMP's mpf_t), a fully separate type from
+    /// Num -- not a wider float, a different kind of value entirely (heap
+    /// allocated, backed by a real library, not IEEE-754 at all). Precision
+    /// is in bits and can be any positive value, not restricted to Num's
+    /// fixed 16/32/64/128 set.
+    BigNum(u32),
     Void,
 }
 
 pub const DEFAULT_NUM_PRECISION: u32 = 64;
+pub const DEFAULT_BIGNUM_PRECISION: u32 = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BinOp {

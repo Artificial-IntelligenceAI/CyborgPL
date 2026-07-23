@@ -83,6 +83,9 @@ fn main() {
         .arg(bin_path)
         .arg("-lm") // pow(), for xx/xxx
         .arg(env!("CYBORGPL_FP128_LIB")) // our own soft-float [precision:128] support
+        .arg(env!("CYBORGPL_BIGNUM_LIB")) // our GMP shim, for bignum
+        .arg(format!("-L{}", env!("CYBORGPL_GMP_LIB_DIR")))
+        .arg("-lgmp")
         .status()
         .expect("failed to invoke cc");
     if !status.success() {

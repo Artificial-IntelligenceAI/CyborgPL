@@ -5,11 +5,24 @@ use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
 use inkwell::targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine};
-use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum, FloatType};
+use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum, FloatType, StructType};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FloatValue, FunctionValue, PointerValue};
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel};
 
 use crate::ast::*;
+
+/// The GMP shim functions (runtime/gmp/bignum_shim.c) backing `bignum`.
+struct BignumFns<'ctx> {
+    new: FunctionValue<'ctx>,
+    set_d: FunctionValue<'ctx>,
+    set_str: FunctionValue<'ctx>,
+    copy: FunctionValue<'ctx>,
+    add: FunctionValue<'ctx>,
+    sub: FunctionValue<'ctx>,
+    mul: FunctionValue<'ctx>,
+    div: FunctionValue<'ctx>,
+    to_string: FunctionValue<'ctx>,
+}
 
 pub struct Codegen<'ctx> {
     context: &'ctx Context,
@@ -23,6 +36,7 @@ pub struct Codegen<'ctx> {
     printf_fn: FunctionValue<'ctx>,
     /// libm's `pow`, backing both `xx` (power) and `xxx` (tetration).
     pow_fn: FunctionValue<'ctx>,
+    bignum: BignumFns<'ctx>,
 }
 
 impl<'ctx> Codegen<'ctx> {
@@ -40,6 +54,55 @@ impl<'ctx> Codegen<'ctx> {
         let pow_type = f64_type.fn_type(&[f64_type.into(), f64_type.into()], false);
         let pow_fn = module.add_function("pow", pow_type, Some(Linkage::External));
 
+        // runtime/gmp/bignum_shim.c -- every handle is an opaque i8_ptr, so
+        // these signatures are the same shape regardless of what GMP itself
+        // actually does under the hood.
+        let void_ty = context.void_type();
+        let i64_ty = context.i64_type();
+        let bignum = BignumFns {
+            new: module.add_function("bignum_new", i8_ptr.fn_type(&[i64_ty.into()], false), Some(Linkage::External)),
+            set_d: module.add_function(
+                "bignum_set_d",
+                void_ty.fn_type(&[i8_ptr.into(), f64_type.into()], false),
+                Some(Linkage::External),
+            ),
+            set_str: module.add_function(
+                "bignum_set_str",
+                void_ty.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            ),
+            copy: module.add_function(
+                "bignum_copy",
+                void_ty.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            ),
+            add: module.add_function(
+                "bignum_add",
+                void_ty.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            ),
+            sub: module.add_function(
+                "bignum_sub",
+                void_ty.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            ),
+            mul: module.add_function(
+                "bignum_mul",
+                void_ty.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            ),
+            div: module.add_function(
+                "bignum_div",
+                void_ty.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            ),
+            to_string: module.add_function(
+                "bignum_to_string",
+                i8_ptr.fn_type(&[i8_ptr.into()], false),
+                Some(Linkage::External),
+            ),
+        };
+
         Codegen {
             context,
             module,
@@ -48,6 +111,7 @@ impl<'ctx> Codegen<'ctx> {
             variables: HashMap::new(),
             printf_fn,
             pow_fn,
+            bignum,
         }
     }
 
@@ -86,8 +150,75 @@ impl<'ctx> Codegen<'ctx> {
             Type::Num(width) => self.float_type_for(width).into(),
             Type::Bool => self.context.bool_type().into(),
             Type::Str => self.context.ptr_type(AddressSpace::default()).into(),
+            Type::BigNum(_) => self.bignum_struct_type().into(),
             Type::Void => panic!("void has no runtime representation"),
         }
+    }
+
+    /// A `bignum` value is a pointer to a heap-allocated GMP handle
+    /// (opaque to us -- see runtime/gmp/bignum_shim.c), but wrapped in a
+    /// single-field struct rather than passed around as a bare pointer.
+    /// This is deliberate: `str` is *also* a bare pointer, and compile_expr
+    /// dispatches purely on the *shape* of a BasicValueEnum (FloatValue,
+    /// PointerValue, etc.) with no separate type tag alongside it. Wrapping
+    /// the pointer keeps `bignum` as its own distinct BasicValueEnum variant
+    /// (StructValue), so it can never be silently confused with a `str`
+    /// pointer at any of the existing dispatch points, without having to
+    /// thread an explicit type alongside every value through codegen.
+    fn bignum_struct_type(&self) -> StructType<'ctx> {
+        self.context.struct_type(&[self.context.ptr_type(AddressSpace::default()).into()], false)
+    }
+
+    fn wrap_bignum_ptr(&self, ptr: PointerValue<'ctx>) -> BasicValueEnum<'ctx> {
+        let undef = self.bignum_struct_type().get_undef();
+        self.builder.build_insert_value(undef, ptr, 0, "bignum_wrap").unwrap().into_struct_value().into()
+    }
+
+    fn unwrap_bignum_ptr(&self, value: BasicValueEnum<'ctx>) -> PointerValue<'ctx> {
+        self.builder
+            .build_extract_value(value.into_struct_value(), 0, "bignum_ptr")
+            .unwrap()
+            .into_pointer_value()
+    }
+
+    /// Calls bignum_new(precision) and returns the resulting handle pointer
+    /// (not yet wrapped -- callers combine this with wrap_bignum_ptr once
+    /// the handle has been populated).
+    fn bignum_new(&self, precision: u32) -> PointerValue<'ctx> {
+        let prec = self.context.i64_type().const_int(precision as u64, false);
+        self.builder
+            .build_call(self.bignum.new, &[prec.into()], "bignum_new_call")
+            .unwrap()
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_pointer_value()
+    }
+
+    /// Converts an already-compiled value into a *freshly allocated* bignum
+    /// at the given precision -- always a fresh handle and a copy/convert,
+    /// never just reusing an existing bignum's pointer directly, so that
+    /// `var:bignum 'x' = ref:var:bignum 'y';` gives x and y independent
+    /// values rather than aliasing the same underlying GMP handle (bignum
+    /// is heap-backed, but has to behave *by value* at the language level,
+    /// the same as every other type here).
+    fn coerce_to_bignum(&self, value: BasicValueEnum<'ctx>, precision: u32) -> BasicValueEnum<'ctx> {
+        let handle = self.bignum_new(precision);
+        match value {
+            BasicValueEnum::FloatValue(f) => {
+                let as_f64 = self.coerce_float(f, 64);
+                self.builder.build_call(self.bignum.set_d, &[handle.into(), as_f64.into()], "bignum_set_d_call").unwrap();
+            }
+            BasicValueEnum::PointerValue(p) => {
+                self.builder.build_call(self.bignum.set_str, &[handle.into(), p.into()], "bignum_set_str_call").unwrap();
+            }
+            BasicValueEnum::StructValue(_) => {
+                let src = self.unwrap_bignum_ptr(value);
+                self.builder.build_call(self.bignum.copy, &[handle.into(), src.into()], "bignum_copy_call").unwrap();
+            }
+            other => panic!("cannot use {other:?} as a bignum value"),
+        }
+        self.wrap_bignum_ptr(handle)
     }
 
     fn float_type_for(&self, width: u32) -> FloatType<'ctx> {
@@ -136,6 +267,7 @@ impl<'ctx> Codegen<'ctx> {
     fn coerce_to_type(&self, value: BasicValueEnum<'ctx>, ty: Type) -> BasicValueEnum<'ctx> {
         match (value, ty) {
             (BasicValueEnum::FloatValue(f), Type::Num(width)) => self.coerce_float(f, width).into(),
+            (_, Type::BigNum(precision)) => self.coerce_to_bignum(value, precision),
             _ => value,
         }
     }
@@ -182,6 +314,7 @@ impl<'ctx> Codegen<'ctx> {
             Type::Num(width) => self.float_type_for(width).fn_type(&param_types, false),
             Type::Bool => self.context.bool_type().fn_type(&param_types, false),
             Type::Str => self.context.ptr_type(AddressSpace::default()).fn_type(&param_types, false),
+            Type::BigNum(_) => self.bignum_struct_type().fn_type(&param_types, false),
             Type::Void => self.context.void_type().fn_type(&param_types, false),
         };
 
@@ -245,6 +378,11 @@ impl<'ctx> Codegen<'ctx> {
                 Type::Str => {
                     let null = self.context.ptr_type(AddressSpace::default()).const_null();
                     self.builder.build_return(Some(&null)).unwrap();
+                }
+                Type::BigNum(_) => {
+                    let null_ptr = self.context.ptr_type(AddressSpace::default()).const_null();
+                    let zero = self.wrap_bignum_ptr(null_ptr);
+                    self.builder.build_return(Some(&zero)).unwrap();
                 }
             }
         }
@@ -483,6 +621,30 @@ impl<'ctx> Codegen<'ctx> {
                         BinOp::Or => self.builder.build_or(li, ri, "or").unwrap().into(),
                         _ => panic!("{op:?} not supported on bool operands"),
                     },
+                    // Simplification, stated plainly rather than hidden: the
+                    // destination of an intermediate bignum operation always
+                    // uses the default precision, regardless of the
+                    // operands' own (possibly custom) precisions -- unlike
+                    // num, this doesn't "widen to the larger operand".
+                    // Assigning the result into an explicitly precise
+                    // variable still works (coerce_to_bignum copies into a
+                    // fresh handle at *that* variable's declared precision),
+                    // but an intermediate expression used elsewhere won't
+                    // retroactively regain precision this step didn't have.
+                    (BasicValueEnum::StructValue(_), BasicValueEnum::StructValue(_)) => {
+                        let shim_fn = match op {
+                            BinOp::Add => self.bignum.add,
+                            BinOp::Sub => self.bignum.sub,
+                            BinOp::Mul => self.bignum.mul,
+                            BinOp::Div => self.bignum.div,
+                            _ => panic!("{op:?} not supported on bignum yet"),
+                        };
+                        let lp = self.unwrap_bignum_ptr(l);
+                        let rp = self.unwrap_bignum_ptr(r);
+                        let dst = self.bignum_new(DEFAULT_BIGNUM_PRECISION);
+                        self.builder.build_call(shim_fn, &[dst.into(), lp.into(), rp.into()], "bignum_op_call").unwrap();
+                        self.wrap_bignum_ptr(dst)
+                    }
                     (l, r) => panic!("binary {op:?} used with mismatched operand types {l:?} / {r:?}"),
                 }
             }
@@ -526,6 +688,17 @@ impl<'ctx> Codegen<'ctx> {
                     .build_select(i, true_str.as_pointer_value(), false_str.as_pointer_value(), "bool_str")
                     .unwrap();
                 ("%s", chosen.into())
+            }
+            BasicValueEnum::StructValue(_) => {
+                let ptr = self.unwrap_bignum_ptr(value);
+                let str_ptr = self
+                    .builder
+                    .build_call(self.bignum.to_string, &[ptr.into()], "bignum_to_string_call")
+                    .unwrap()
+                    .try_as_basic_value()
+                    .basic()
+                    .unwrap();
+                ("%s", str_ptr.into())
             }
             other => panic!("unsupported value for text formatting: {other:?}"),
         }

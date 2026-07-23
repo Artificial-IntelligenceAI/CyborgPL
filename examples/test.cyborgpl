@@ -17,4 +17,12 @@ print*"pi at 16-bit: " (ref:var:num[precision:16] 'pi16') ", 32-bit: " (ref:var:
 print*"mixed-precision add (16+64): " (ref:var:num[precision:16] 'pi16' + ref:var:num 'pi64')*;
 print*"128-bit arithmetic: " (ref:var:num[precision:128] 'pi128' x ref:var:num[precision:128] 'pi128')*;
 
+var:bignum 'apples' = "999999999999999999999999999999999999999";
+print*"apples as bignum: " (ref:var:bignum 'apples')*;
+var:bignum 'pi_big' = "3.14159265358979323846264338327950288419716939937510582097494459230781640628620899862803482534211706798214808651328230664709384460955058223172535940812848111745028410270193852110555964462294895493038196";
+print*"pi as bignum: " (ref:var:bignum 'pi_big')*;
+var:bignum 'two' = 2;
+var:bignum 'three' = 3;
+print*"2/3 as bignum: " (ref:var:bignum 'two' / ref:var:bignum 'three')*;
+
 END
