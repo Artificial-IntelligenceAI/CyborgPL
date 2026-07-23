@@ -9,4 +9,12 @@ print*"Hell/no/7489/988384\"wsp\"D::fmkdjf{🫪}😂😈 " (ref:var:num 'apples'
 print*(ref:var:bool 'great_language???')*;
 print*"apples as num: " (ref:var:num 'apples') ", as str: " (ref:var:str 'apples') ", as bool: " (ref:var:bool 'apples')*;
 
+var:num 'pi16' = 3.14159265358979 [precision:16];
+var:num 'pi32' = 3.14159265358979 [precision:32];
+var:num 'pi64' = 3.14159265358979;
+var:num 'pi128' = 3.14159265358979 [precision:128];
+print*"pi at 16-bit: " (ref:var:num[precision:16] 'pi16') ", 32-bit: " (ref:var:num[precision:32] 'pi32') ", 64-bit: " (ref:var:num 'pi64') ", 128-bit: " (ref:var:num[precision:128] 'pi128')*;
+print*"mixed-precision add (16+64): " (ref:var:num[precision:16] 'pi16' + ref:var:num 'pi64')*;
+print*"128-bit arithmetic: " (ref:var:num[precision:128] 'pi128' x ref:var:num[precision:128] 'pi128')*;
+
 END
