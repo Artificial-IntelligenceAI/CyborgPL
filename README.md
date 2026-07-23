@@ -61,6 +61,26 @@ See [examples/](examples/) for more.
 
 This is a solo, exploratory project and the language design is still very much in flux — I'm not reviewing external pull requests right now, since core syntax decisions are still being made and would likely conflict with in-progress work. That said, if you have ideas, questions, or spot a bug, **opening an issue is very welcome**.
 
+## Design credit
+
+The language design is mine; Claude Code implemented it. To be specific about which parts of the syntax were actual design decisions versus implementation defaults it picked and I never revisited:
+
+**Designed by me:**
+- `var:type 'name' = value;` variable syntax
+- `START ... END` as the program's entry point
+- `ref:var:type 'name'` for every reference, and the "quote everything" rules
+- `x` / `xx` / `xxx` (multiply/power/tetration) — I chose to fully replace `*`; Claude proposed the `xx`/`xxx` naming and I confirmed it
+- Same-name-different-type variables
+- `[precision:16/32/64/128]` syntax
+- The decision to add `bignum` via GMP, kept separate from `num`
+- Base type keywords (`num`, `str`, `bool`)
+- Automatic scope-based memory management (no manual `free`) — chosen among options Claude presented
+
+**Defaulted by Claude** (conventional choices from the first scaffolding commit, never revisited):
+- `fn 'name'(param: type, ...) -> type { ... }` function declaration syntax
+- `if`/`else`/`while` keywords and brace-delimited blocks
+- Comparison/logical operators' exact spelling
+
 ## Acknowledgments
 
 Built in collaboration with [Claude Code](https://claude.com/claude-code) — most of the implementation work (lexer, parser, codegen, the from-scratch fp128 float support, the GMP-backed bignum type) was written together with it, with language design decisions made by the project author.
