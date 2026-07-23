@@ -36,6 +36,9 @@ pub enum Token {
     RParen,
     LBrace,
     RBrace,
+    /// Only used for `[precision:N]` right now.
+    LBracket,
+    RBracket,
     Comma,
     Colon,
     Semicolon,

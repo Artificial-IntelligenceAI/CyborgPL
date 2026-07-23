@@ -1,11 +1,17 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Type {
-    /// A number, always able to hold either whole or decimal values.
-    Num,
+    /// A number, always able to hold either whole or decimal values, stored
+    /// as an IEEE-754 float of the given bit width (16/32/64/128; 64 is the
+    /// default when no `[precision:N]` is given). Different widths count as
+    /// different types for the purposes of same-name variable sharing, same
+    /// as Num/Bool/Str already do.
+    Num(u32),
     Bool,
     Str,
     Void,
 }
+
+pub const DEFAULT_NUM_PRECISION: u32 = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BinOp {

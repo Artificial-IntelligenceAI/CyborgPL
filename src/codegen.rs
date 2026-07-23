@@ -5,7 +5,7 @@ use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
 use inkwell::targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine};
-use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
+use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum, FloatType};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FloatValue, FunctionValue, PointerValue};
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel};
 
@@ -83,11 +83,83 @@ impl<'ctx> Codegen<'ctx> {
 
     fn basic_type(&self, ty: Type) -> BasicTypeEnum<'ctx> {
         match ty {
-            Type::Num => self.context.f64_type().into(),
+            Type::Num(width) => self.float_type_for(width).into(),
             Type::Bool => self.context.bool_type().into(),
             Type::Str => self.context.ptr_type(AddressSpace::default()).into(),
             Type::Void => panic!("void has no runtime representation"),
         }
+    }
+
+    fn float_type_for(&self, width: u32) -> FloatType<'ctx> {
+        match width {
+            16 => self.context.f16_type(),
+            32 => self.context.f32_type(),
+            64 => self.context.f64_type(),
+            128 => self.context.f128_type(),
+            other => panic!("unsupported num precision: {other} (the parser should have rejected this)"),
+        }
+    }
+
+    fn float_bit_width(&self, ty: FloatType<'ctx>) -> u32 {
+        if ty == self.context.f16_type() {
+            16
+        } else if ty == self.context.f32_type() {
+            32
+        } else if ty == self.context.f64_type() {
+            64
+        } else if ty == self.context.f128_type() {
+            128
+        } else {
+            panic!("unrecognized float type in codegen")
+        }
+    }
+
+    /// Widens or narrows a float to the given bit width, a no-op if it's
+    /// already that width. Needed because two `num`s of different
+    /// precisions can't be combined in an LLVM op directly (they must
+    /// match), and libm's `pow` only accepts `double`.
+    fn coerce_float(&self, f: FloatValue<'ctx>, target_width: u32) -> FloatValue<'ctx> {
+        let current_width = self.float_bit_width(f.get_type());
+        if current_width == target_width {
+            return f;
+        }
+        let target_ty = self.float_type_for(target_width);
+        if current_width < target_width {
+            self.builder.build_float_ext(f, target_ty, "prec_ext").unwrap()
+        } else {
+            self.builder.build_float_trunc(f, target_ty, "prec_trunc").unwrap()
+        }
+    }
+
+    /// If a value being stored/passed doesn't match the target num
+    /// precision, converts it. No-op for bool/str.
+    fn coerce_to_type(&self, value: BasicValueEnum<'ctx>, ty: Type) -> BasicValueEnum<'ctx> {
+        match (value, ty) {
+            (BasicValueEnum::FloatValue(f), Type::Num(width)) => self.coerce_float(f, width).into(),
+            _ => value,
+        }
+    }
+
+    /// Widens the narrower of two floats to match the wider one, so binary
+    /// ops always see matching operand types. No-op if they already match
+    /// or aren't both floats.
+    fn match_float_widths(
+        &self,
+        l: BasicValueEnum<'ctx>,
+        r: BasicValueEnum<'ctx>,
+    ) -> (BasicValueEnum<'ctx>, BasicValueEnum<'ctx>) {
+        if let (BasicValueEnum::FloatValue(lf), BasicValueEnum::FloatValue(rf)) = (l, r) {
+            if lf.get_type() != rf.get_type() {
+                let lw = self.float_bit_width(lf.get_type());
+                let rw = self.float_bit_width(rf.get_type());
+                return if lw < rw {
+                    (self.coerce_float(lf, rw).into(), r)
+                } else {
+                    (l, self.coerce_float(rf, lw).into())
+                };
+            }
+        }
+        (l, r)
     }
 
     pub fn compile_program(&mut self, program: &Program) -> Result<(), String> {
@@ -107,7 +179,7 @@ impl<'ctx> Codegen<'ctx> {
             f.params.iter().map(|p| self.basic_type(p.ty).into()).collect();
 
         let fn_type = match f.return_type {
-            Type::Num => self.context.f64_type().fn_type(&param_types, false),
+            Type::Num(width) => self.float_type_for(width).fn_type(&param_types, false),
             Type::Bool => self.context.bool_type().fn_type(&param_types, false),
             Type::Str => self.context.ptr_type(AddressSpace::default()).fn_type(&param_types, false),
             Type::Void => self.context.void_type().fn_type(&param_types, false),
@@ -162,8 +234,8 @@ impl<'ctx> Codegen<'ctx> {
                 Type::Void => {
                     self.builder.build_return(None).unwrap();
                 }
-                Type::Num => {
-                    let zero = self.context.f64_type().const_float(0.0);
+                Type::Num(width) => {
+                    let zero = self.float_type_for(width).const_float(0.0);
                     self.builder.build_return(Some(&zero)).unwrap();
                 }
                 Type::Bool => {
@@ -195,6 +267,7 @@ impl<'ctx> Codegen<'ctx> {
         match stmt {
             Stmt::VarDecl(name, ty, expr) => {
                 let value = self.compile_expr(expr)?;
+                let value = self.coerce_to_type(value, *ty);
                 let llvm_ty = self.basic_type(*ty);
                 let alloca = self.builder.build_alloca(llvm_ty, name).unwrap();
                 self.builder.build_store(alloca, value).unwrap();
@@ -202,6 +275,7 @@ impl<'ctx> Codegen<'ctx> {
             }
             Stmt::Assign(name, ty, expr) => {
                 let value = self.compile_expr(expr)?;
+                let value = self.coerce_to_type(value, *ty);
                 let (ptr, _ty) = *self
                     .variables
                     .get(&(name.clone(), *ty))
@@ -344,6 +418,9 @@ impl<'ctx> Codegen<'ctx> {
             Expr::Binary(lhs, op, rhs) => {
                 let l = self.compile_expr(lhs)?;
                 let r = self.compile_expr(rhs)?;
+                // Two nums of different precisions can't be combined by an
+                // LLVM op directly -- widen the narrower one to match first.
+                let (l, r) = self.match_float_widths(l, r);
 
                 match (l, r) {
                     (BasicValueEnum::FloatValue(lf), BasicValueEnum::FloatValue(rf)) => match op {
@@ -351,14 +428,22 @@ impl<'ctx> Codegen<'ctx> {
                         BinOp::Sub => self.builder.build_float_sub(lf, rf, "sub").unwrap().into(),
                         BinOp::Mul => self.builder.build_float_mul(lf, rf, "mul").unwrap().into(),
                         BinOp::Div => self.builder.build_float_div(lf, rf, "div").unwrap().into(),
-                        BinOp::Pow => self
-                            .builder
-                            .build_call(self.pow_fn, &[lf.into(), rf.into()], "pow")
-                            .unwrap()
-                            .try_as_basic_value()
-                            .basic()
-                            .unwrap(),
-                        BinOp::Tetration => self.compile_tetration(lf, rf).into(),
+                        BinOp::Pow => {
+                            // libm's pow is fixed to `double` regardless of num's precision.
+                            let lf64 = self.coerce_float(lf, 64);
+                            let rf64 = self.coerce_float(rf, 64);
+                            self.builder
+                                .build_call(self.pow_fn, &[lf64.into(), rf64.into()], "pow")
+                                .unwrap()
+                                .try_as_basic_value()
+                                .basic()
+                                .unwrap()
+                        }
+                        BinOp::Tetration => {
+                            let lf64 = self.coerce_float(lf, 64);
+                            let rf64 = self.coerce_float(rf, 64);
+                            self.compile_tetration(lf64, rf64).into()
+                        }
                         BinOp::Eq => self
                             .builder
                             .build_float_compare(FloatPredicate::OEQ, lf, rf, "eq")
@@ -423,7 +508,10 @@ impl<'ctx> Codegen<'ctx> {
     /// format string across all of its segments.
     fn value_fmt(&self, value: BasicValueEnum<'ctx>) -> (&'static str, BasicMetadataValueEnum<'ctx>) {
         match value {
-            BasicValueEnum::FloatValue(f) => ("%g", f.into()),
+            // printf's varargs ABI expects `double` regardless of num's
+            // declared precision (C's default argument promotion, which we
+            // have to do explicitly since LLVM won't do it for us).
+            BasicValueEnum::FloatValue(f) => ("%g", self.coerce_float(f, 64).into()),
             BasicValueEnum::PointerValue(p) => ("%s", p.into()),
             BasicValueEnum::IntValue(i) => {
                 // Only bools (i1) reach here. The actual value is only known
