@@ -27,6 +27,7 @@ struct BignumFns<'ctx> {
     /// Truncates a bignum to a native i64 -- used to turn a tetration
     /// height into a loop trip count.
     get_i64: FunctionValue<'ctx>,
+    neg: FunctionValue<'ctx>,
 }
 
 /// One entry per variable declared directly in a block, remembering
@@ -156,6 +157,11 @@ impl<'ctx> Codegen<'ctx> {
             get_i64: module.add_function(
                 "bignum_get_i64",
                 i64_ty.fn_type(&[i8_ptr.into()], false),
+                Some(Linkage::External),
+            ),
+            neg: module.add_function(
+                "bignum_neg",
+                void_ty.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
                 Some(Linkage::External),
             ),
         };
@@ -753,6 +759,18 @@ impl<'ctx> Codegen<'ctx> {
                     }
                     (UnOp::Not, BasicValueEnum::IntValue(i)) => {
                         self.builder.build_not(i, "not").unwrap().into()
+                    }
+                    (UnOp::Neg, v @ BasicValueEnum::StructValue(_)) => {
+                        let src = self.unwrap_bignum_ptr(v);
+                        let dst = self.bignum_new(DEFAULT_BIGNUM_PRECISION);
+                        self.builder.build_call(self.bignum.neg, &[dst.into(), src.into()], "bignum_neg_call").unwrap();
+                        // Same lifetime story as every other fresh bignum
+                        // temporary (see bignum_temps' field docs): nothing
+                        // adopts this handle, so the enclosing statement
+                        // frees it once it's done being consumed.
+                        let wrapped = self.wrap_bignum_ptr(dst);
+                        self.bignum_temps.push((dst, wrapped));
+                        wrapped
                     }
                     (op, other) => panic!("unary {op:?} not supported on {other:?}"),
                 }
