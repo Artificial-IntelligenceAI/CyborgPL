@@ -1,0 +1,11 @@
+START
+
+var:bignum 'base' = 2;
+var:bignum 'height' = 4;
+print*"2 xxx 4 = " (ref:var:bignum 'base' xxx ref:var:bignum 'height')*;
+
+var:bignum 'base2' = 3;
+var:bignum 'height2' = 3;
+print*"3 xxx 3 = " (ref:var:bignum 'base2' xxx ref:var:bignum 'height2')*;
+
+END
