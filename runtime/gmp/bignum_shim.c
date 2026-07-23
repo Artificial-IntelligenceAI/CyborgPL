@@ -4,12 +4,12 @@
 // GMP's real C API (mpf_t's array-of-1-struct typedef trick, mp_bitcnt_t,
 // mp_exp_t, etc.) from LLVM IR.
 //
-// A `bignum` handle is just a malloc'd mpf_t. Never freed -- the same
-// accepted simplification already used elsewhere in this codebase (str
-// literals, stch's old concat buffer): CyborgPL has no memory management
-// story yet at all, and adding one just for bignum specifically wouldn't
-// fix that. bignum_to_string's return value is the same story -- a leaked
-// but valid C string, safe to print and never freed.
+// A `bignum` handle is a malloc'd mpf_t, freed via bignum_free once
+// codegen determines (via scope-exit/reassignment tracking) that nothing
+// references it anymore. bignum_to_string's return value is still never
+// freed -- a leaked but valid C string, safe to print -- since it's only
+// ever handed straight to printf and CyborgPL has no other string
+// lifetime story yet.
 
 #include <gmp.h>
 #include <stdlib.h>
@@ -46,6 +46,11 @@ void bignum_mul(void *dst, void *a, void *b) {
 
 void bignum_div(void *dst, void *a, void *b) {
     mpf_div(*(mpf_t *)dst, *(mpf_t *)a, *(mpf_t *)b);
+}
+
+void bignum_free(void *x) {
+    mpf_clear(*(mpf_t *)x);
+    free(x);
 }
 
 char *bignum_to_string(void *x) {

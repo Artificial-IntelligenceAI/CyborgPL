@@ -22,6 +22,26 @@ struct BignumFns<'ctx> {
     mul: FunctionValue<'ctx>,
     div: FunctionValue<'ctx>,
     to_string: FunctionValue<'ctx>,
+    free: FunctionValue<'ctx>,
+}
+
+/// One entry per variable declared directly in a block, remembering
+/// whatever needs to happen to `Codegen::variables` when that block ends:
+/// either the key simply disappears (nothing of that name existed before
+/// this block), or an outer variable of the same (name, type) was
+/// shadowed and must reappear.
+enum ScopeEntry<'ctx> {
+    New((String, Type)),
+    Shadowed((String, Type), (PointerValue<'ctx>, BasicTypeEnum<'ctx>)),
+}
+
+impl<'ctx> ScopeEntry<'ctx> {
+    fn key(&self) -> &(String, Type) {
+        match self {
+            ScopeEntry::New(k) => k,
+            ScopeEntry::Shadowed(k, _) => k,
+        }
+    }
 }
 
 pub struct Codegen<'ctx> {
@@ -33,6 +53,24 @@ pub struct Codegen<'ctx> {
     /// by variables of different types -- ref:var:TYPE 'name' picks between
     /// them by type at each reference site.
     variables: HashMap<(String, Type), (PointerValue<'ctx>, BasicTypeEnum<'ctx>)>,
+    /// Stack of block scopes, innermost last. Each `compile_block` call
+    /// pushes one frame and pops it when the block ends, restoring
+    /// whatever `variables` looked like before that block ran.
+    scopes: Vec<Vec<ScopeEntry<'ctx>>>,
+    /// Bignum handles allocated as *intermediate* expression results (only
+    /// source today: the binary-op arm below) during the statement
+    /// currently being compiled -- never a named variable's own handle.
+    /// Drained and freed once that statement finishes, since nothing else
+    /// will ever reference them (every consumer -- coerce_to_bignum,
+    /// bignum_to_string, an enclosing binary op -- reads/copies, never
+    /// adopts the pointer). Each entry keeps both the raw handle (to free)
+    /// and the exact wrapped value produced for it (`build_extract_value`
+    /// makes a *new* instruction every time it's called, even reading the
+    /// same field back out of the same struct -- so identifying "is this
+    /// literally the value this statement is returning" has to compare
+    /// against that original produced value, not a freshly re-extracted
+    /// pointer, or the comparison never matches).
+    bignum_temps: Vec<(PointerValue<'ctx>, BasicValueEnum<'ctx>)>,
     printf_fn: FunctionValue<'ctx>,
     /// libm's `pow`, backing both `xx` (power) and `xxx` (tetration).
     pow_fn: FunctionValue<'ctx>,
@@ -101,6 +139,11 @@ impl<'ctx> Codegen<'ctx> {
                 i8_ptr.fn_type(&[i8_ptr.into()], false),
                 Some(Linkage::External),
             ),
+            free: module.add_function(
+                "bignum_free",
+                void_ty.fn_type(&[i8_ptr.into()], false),
+                Some(Linkage::External),
+            ),
         };
 
         Codegen {
@@ -109,6 +152,8 @@ impl<'ctx> Codegen<'ctx> {
             builder,
             functions: HashMap::new(),
             variables: HashMap::new(),
+            scopes: Vec::new(),
+            bignum_temps: Vec::new(),
             printf_fn,
             pow_fn,
             bignum,
@@ -294,6 +339,63 @@ impl<'ctx> Codegen<'ctx> {
         (l, r)
     }
 
+    /// Records that `key` was just declared in the *current* (innermost)
+    /// block, so its binding can be undone when that block ends. A no-op
+    /// if the current block already owns this key (redeclaring the same
+    /// name/type twice in one block is just a rebind, not new shadowing --
+    /// the original scope entry already remembers what to restore).
+    fn declare_scoped(&mut self, key: (String, Type)) {
+        let frame = self.scopes.last().expect("declare_scoped called outside any block");
+        if frame.iter().any(|e| e.key() == &key) {
+            return;
+        }
+        let entry = match self.variables.get(&key) {
+            Some(&old) => ScopeEntry::Shadowed(key, old),
+            None => ScopeEntry::New(key),
+        };
+        self.scopes.last_mut().unwrap().push(entry);
+    }
+
+    /// Frees the bignum handle currently stored in `key`'s variable slot.
+    /// Only valid to call while that slot's alloca is still live.
+    fn free_bignum_var(&mut self, key: &(String, Type)) {
+        let (ptr, llvm_ty) = *self.variables.get(key).expect("free_bignum_var on unknown variable");
+        let loaded = self.builder.build_load(llvm_ty, ptr, "bignum_for_free").unwrap();
+        let handle = self.unwrap_bignum_ptr(loaded);
+        self.free_bignum_ptr(handle);
+    }
+
+    fn free_bignum_ptr(&mut self, ptr: PointerValue<'ctx>) {
+        self.builder.build_call(self.bignum.free, &[ptr.into()], "bignum_free_call").unwrap();
+    }
+
+    /// Ends the innermost block scope: every bignum it owns is freed (skip
+    /// this only when the block already ended in `return`, since Return
+    /// frees everything itself before the terminator -- freeing again
+    /// here would double-free), then each entry's binding is undone
+    /// (removed if `New`, restored to the outer value if `Shadowed`).
+    /// The `variables` bookkeeping always happens regardless of
+    /// termination -- it reflects lexical structure, not control flow, and
+    /// later sibling code needs it to be correct either way.
+    fn pop_scope(&mut self, emit_frees: bool) {
+        let entries = self.scopes.pop().expect("pop_scope with no open scope");
+        for entry in entries.into_iter().rev() {
+            if emit_frees {
+                if let (_, Type::BigNum(_)) = entry.key() {
+                    self.free_bignum_var(entry.key());
+                }
+            }
+            match entry {
+                ScopeEntry::New(key) => {
+                    self.variables.remove(&key);
+                }
+                ScopeEntry::Shadowed(key, old) => {
+                    self.variables.insert(key, old);
+                }
+            }
+        }
+    }
+
     pub fn compile_program(&mut self, program: &Program) -> Result<(), String> {
         // Declare every function signature up front so calls to functions
         // defined later in the file (or mutually recursive calls) resolve.
@@ -330,6 +432,7 @@ impl<'ctx> Codegen<'ctx> {
         let block = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(block);
         self.variables.clear();
+        self.scopes.clear();
 
         self.compile_block(entry)?;
 
@@ -346,6 +449,7 @@ impl<'ctx> Codegen<'ctx> {
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
         self.variables.clear();
+        self.scopes.clear();
 
         for (i, param) in f.params.iter().enumerate() {
             let value = function.get_nth_param(i as u32).unwrap();
@@ -390,6 +494,7 @@ impl<'ctx> Codegen<'ctx> {
     }
 
     fn compile_block(&mut self, block: &Block) -> Result<(), String> {
+        self.scopes.push(Vec::new());
         for stmt in block {
             // Once a block is terminated (e.g. by `return`), any further
             // statements are unreachable; don't try to emit code for them.
@@ -398,6 +503,11 @@ impl<'ctx> Codegen<'ctx> {
             }
             self.compile_stmt(stmt)?;
         }
+        // If a `return` inside this block already terminated it, it also
+        // already freed every bignum in every open scope itself (see
+        // Stmt::Return) -- emit_frees=false here avoids freeing them again.
+        let terminated = self.builder.get_insert_block().unwrap().get_terminator().is_some();
+        self.pop_scope(!terminated);
         Ok(())
     }
 
@@ -406,24 +516,89 @@ impl<'ctx> Codegen<'ctx> {
             Stmt::VarDecl(name, ty, expr) => {
                 let value = self.compile_expr(expr)?;
                 let value = self.coerce_to_type(value, *ty);
+                let key = (name.clone(), *ty);
+
+                // Re-declaring a bignum name that's already alive (same
+                // block, or shadowing an outer one) would otherwise leak
+                // its old handle -- free it before the slot's replaced.
+                if let (Type::BigNum(_), Some(_)) = (*ty, self.variables.get(&key)) {
+                    self.free_bignum_var(&key);
+                }
+
                 let llvm_ty = self.basic_type(*ty);
                 let alloca = self.builder.build_alloca(llvm_ty, name).unwrap();
                 self.builder.build_store(alloca, value).unwrap();
-                self.variables.insert((name.clone(), *ty), (alloca, llvm_ty));
+                self.declare_scoped(key.clone());
+                self.variables.insert(key, (alloca, llvm_ty));
             }
             Stmt::Assign(name, ty, expr) => {
                 let value = self.compile_expr(expr)?;
                 let value = self.coerce_to_type(value, *ty);
+                let key = (name.clone(), *ty);
                 let (ptr, _ty) = *self
                     .variables
-                    .get(&(name.clone(), *ty))
+                    .get(&key)
                     .ok_or_else(|| format!("undefined variable '{name}' of type {ty:?}"))?;
+                // Reassignment always stores a fresh handle (coerce_to_type
+                // -> coerce_to_bignum), so the old one must be freed here
+                // or it leaks -- the slot itself doesn't change, only what
+                // it points at.
+                if let Type::BigNum(_) = *ty {
+                    self.free_bignum_var(&key);
+                }
                 self.builder.build_store(ptr, value).unwrap();
             }
             Stmt::Return(expr) => {
-                match expr {
-                    Some(e) => {
-                        let value = self.compile_expr(e)?;
+                // A bare `return ref:var:bignum 'x';` hands out 'x''s own
+                // handle (reading a variable doesn't copy it -- only
+                // assignment does), so that one specific variable must
+                // survive the free pass below or the caller gets a
+                // dangling pointer. Anything else (a computed bignum
+                // expression, a different type entirely) doesn't alias any
+                // local, since bignum binary ops always allocate a fresh
+                // destination handle.
+                let skip_key = match expr {
+                    Some(Expr::Var(n, ty @ Type::BigNum(_))) => Some((n.clone(), *ty)),
+                    _ => None,
+                };
+                let value = match expr {
+                    Some(e) => Some(self.compile_expr(e)?),
+                    None => None,
+                };
+                // If the returned value is itself a fresh bignum temporary
+                // (`return a + b;`), it must survive the temp-draining pass
+                // below -- it's the function's actual return value now, not
+                // a discarded intermediate. Compared against the exact
+                // value `compile_expr` produced for it, not a freshly
+                // re-extracted pointer (see the `bignum_temps` field docs).
+                let temps: Vec<(PointerValue<'ctx>, BasicValueEnum<'ctx>)> = self.bignum_temps.drain(..).collect();
+                for (ptr, produced) in temps {
+                    let is_returned = matches!(value, Some(v) if v == produced);
+                    if !is_returned {
+                        self.free_bignum_ptr(ptr);
+                    }
+                }
+                // A `return` exits every block it's nested in at once, so
+                // every currently-open scope must be freed here -- not
+                // just the innermost. This only frees; it deliberately
+                // doesn't pop `self.scopes` (that stays for the enclosing
+                // compile_block calls to unwind normally once control
+                // returns to them, since sibling/later code compiled after
+                // this dead end still needs correct scoping).
+                let to_free: Vec<(String, Type)> = self
+                    .scopes
+                    .iter()
+                    .rev()
+                    .flat_map(|frame| frame.iter().rev())
+                    .map(ScopeEntry::key)
+                    .filter(|key| matches!(key.1, Type::BigNum(_)) && Some(*key) != skip_key.as_ref())
+                    .cloned()
+                    .collect();
+                for key in &to_free {
+                    self.free_bignum_var(key);
+                }
+                match value {
+                    Some(value) => {
                         self.builder.build_return(Some(&value)).unwrap();
                     }
                     None => {
@@ -525,6 +700,21 @@ impl<'ctx> Codegen<'ctx> {
 
                 self.builder.position_at_end(merge_bb);
             }
+        }
+        // Free any bignum temporaries created while evaluating this
+        // statement's own expression(s) (Stmt::Return drains and frees its
+        // own -- protecting the value it returns -- before building its
+        // terminator, so this is empty by the time we get here for that
+        // case). Skipped if the block already ended in `return`: there's
+        // no valid insertion point left before a terminator, but there's
+        // also nothing left to free -- Return already handled it.
+        if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+            let temps: Vec<(PointerValue<'ctx>, BasicValueEnum<'ctx>)> = self.bignum_temps.drain(..).collect();
+            for (ptr, _) in temps {
+                self.free_bignum_ptr(ptr);
+            }
+        } else {
+            self.bignum_temps.clear();
         }
         Ok(())
     }
@@ -643,7 +833,14 @@ impl<'ctx> Codegen<'ctx> {
                         let rp = self.unwrap_bignum_ptr(r);
                         let dst = self.bignum_new(DEFAULT_BIGNUM_PRECISION);
                         self.builder.build_call(shim_fn, &[dst.into(), lp.into(), rp.into()], "bignum_op_call").unwrap();
-                        self.wrap_bignum_ptr(dst)
+                        // Nothing else ever adopts this handle -- whatever
+                        // consumes it (a store via coerce_to_bignum, a print,
+                        // an enclosing binary op) only reads or copies from
+                        // it. Registered here so the end of whichever
+                        // statement this expression is part of can free it.
+                        let wrapped = self.wrap_bignum_ptr(dst);
+                        self.bignum_temps.push((dst, wrapped));
+                        wrapped
                     }
                     (l, r) => panic!("binary {op:?} used with mismatched operand types {l:?} / {r:?}"),
                 }
