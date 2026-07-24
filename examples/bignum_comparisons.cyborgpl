@@ -5,7 +5,7 @@ var:bignum 'b' = (3);
 
 print*"a < b = " (ref:var:bignum 'a') < (ref:var:bignum 'b')*;
 print*"a == a = " (ref:var:bignum 'a') == (ref:var:bignum 'a')*;
-print*"a != b = " (ref:var:bignum 'a') != (ref:var:bignum 'b')*;
+print*"a not= b = " (ref:var:bignum 'a') not= (ref:var:bignum 'b')*;
 
 var:bignum 'counter' = (0);
 var:bignum 'limit' = (5);

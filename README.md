@@ -95,10 +95,11 @@ The language design is mine; Claude Code implemented it. To be specific about wh
 - `numw` and its `'1 million'`-style literal syntax
 - `func 'name'*param, ...*` — replacing the original defaulted `fn` keyword and `( )` parameter list with `func` and `*...*`, matching `print`'s own bracketing style and the `ref:func` call syntax
 - `ref:func 'name'*arg, ...*` — replacing the original defaulted bare `'name'(...)` call syntax, mirroring `ref:var:TYPE 'name'`'s shape for reading a variable
+- `not` / `not=` — replacing the originally-defaulted `!` (boolean not) and `!=` (not-equal) entirely
 
 **Defaulted by Claude** (conventional choices from the first scaffolding commit, never revisited):
 - `if`/`else`/`while` keywords and brace-delimited blocks
-- Comparison/logical operators' exact spelling
+- Remaining comparison/logical operators' exact spelling (`<`, `>`, `<=`, `>=`, `==`, `&&`, `||`)
 
 ## Acknowledgments
 

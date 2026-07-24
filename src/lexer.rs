@@ -70,14 +70,6 @@ impl<'a> Lexer<'a> {
                     Token::Eq
                 }
             }
-            '!' => {
-                if self.peek_char() == Some('=') {
-                    self.chars.next();
-                    Token::BangEq
-                } else {
-                    Token::Bang
-                }
-            }
             '<' => {
                 if self.peek_char() == Some('=') {
                     self.chars.next();
@@ -215,7 +207,13 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
-        Token::keyword_from_str(&s).unwrap_or(Token::Ident(s))
+        let token = Token::keyword_from_str(&s).unwrap_or(Token::Ident(s));
+        if token == Token::Not && self.peek_char() == Some('=') {
+            self.chars.next();
+            Token::NotEq
+        } else {
+            token
+        }
     }
 
     fn skip_whitespace_and_comments(&mut self) {

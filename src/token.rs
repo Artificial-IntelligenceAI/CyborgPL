@@ -60,8 +60,10 @@ pub enum Token {
     Slash,
     Eq,      // =
     EqEq,    // ==
-    Bang,    // !
-    BangEq,  // !=
+    /// `not` (prefix boolean negation).
+    Not,
+    /// `not=` (not-equal comparison), written as one word with no space.
+    NotEq,
     Lt,      // <
     Gt,      // >
     LtEq,    // <=
@@ -85,6 +87,7 @@ impl Token {
             "true" => Some(Token::True),
             "false" => Some(Token::False),
             "print" => Some(Token::Print),
+            "not" => Some(Token::Not),
             "START" => Some(Token::Start),
             "END" => Some(Token::End),
             "x" => Some(Token::Mul),

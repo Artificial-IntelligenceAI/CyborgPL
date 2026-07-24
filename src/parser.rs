@@ -265,7 +265,7 @@ impl Parser {
                         // fully consumes its own `*args*` before this loop
                         // checks for the closing `*` again, so there's no
                         // ambiguity between the two uses of `*`.
-                        Token::LParen | Token::Ref => {
+                        Token::LParen | Token::Ref | Token::Minus | Token::Not => {
                             let value = self.parse_expr()?;
                             segments.push(PrintSegment::Expr(value));
                         }
@@ -339,7 +339,7 @@ impl Parser {
         loop {
             let op = match self.peek() {
                 Token::EqEq => BinOp::Eq,
-                Token::BangEq => BinOp::Ne,
+                Token::NotEq => BinOp::Ne,
                 _ => break,
             };
             self.advance();
@@ -397,7 +397,7 @@ impl Parser {
     }
 
     /// `xx` (power) and `xxx` (tetration), right-associative and binding
-    /// tighter than `x`/`/` but looser than unary `-`/`!`.
+    /// tighter than `x`/`/` but looser than unary `-`/`not`.
     fn parse_power(&mut self) -> PResult<Expr> {
         let left = self.parse_unary()?;
         let op = match self.peek() {
@@ -417,7 +417,7 @@ impl Parser {
                 let operand = self.parse_unary()?;
                 Ok(Expr::Unary(UnOp::Neg, Box::new(operand)))
             }
-            Token::Bang => {
+            Token::Not => {
                 self.advance();
                 let operand = self.parse_unary()?;
                 Ok(Expr::Unary(UnOp::Not, Box::new(operand)))
