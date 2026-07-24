@@ -422,8 +422,20 @@ impl Parser {
                 let operand = self.parse_unary()?;
                 Ok(Expr::Unary(UnOp::Not, Box::new(operand)))
             }
-            _ => self.parse_primary(),
+            _ => self.parse_postfix(),
         }
+    }
+
+    /// Postfix `!` (factorial), binding tighter than anything to its left --
+    /// it attaches directly to the atom/call it follows, e.g. `(5)!`, and
+    /// can chain (`(5)!!`) the same way prefix `not not (x)` already does.
+    fn parse_postfix(&mut self) -> PResult<Expr> {
+        let mut expr = self.parse_primary()?;
+        while self.check(&Token::Bang) {
+            self.advance();
+            expr = Expr::Unary(UnOp::Factorial, Box::new(expr));
+        }
+        Ok(expr)
     }
 
     /// Every value (a number/string/bool literal, or a `ref:var:TYPE 'name'`

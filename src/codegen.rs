@@ -835,6 +835,13 @@ impl<'ctx> Codegen<'ctx> {
                     (UnOp::Not, BasicValueEnum::IntValue(i)) => {
                         self.builder.build_not(i, "not").unwrap().into()
                     }
+                    (UnOp::Factorial, BasicValueEnum::FloatValue(f)) => {
+                        // Same simplification pow/tetration already make:
+                        // always computed at 64-bit regardless of the
+                        // operand's declared precision.
+                        let f64v = self.coerce_float(f, 64);
+                        self.compile_factorial(f64v).into()
+                    }
                     (UnOp::Neg, v @ BasicValueEnum::StructValue(_)) => {
                         let src = self.unwrap_bignum_ptr(v);
                         let dst = self.bignum_new(DEFAULT_BIGNUM_PRECISION);
@@ -843,6 +850,13 @@ impl<'ctx> Codegen<'ctx> {
                         // temporary (see bignum_temps' field docs): nothing
                         // adopts this handle, so the enclosing statement
                         // frees it once it's done being consumed.
+                        let wrapped = self.wrap_bignum_ptr(dst);
+                        self.bignum_temps.push((dst, wrapped));
+                        wrapped
+                    }
+                    (UnOp::Factorial, v @ BasicValueEnum::StructValue(_)) => {
+                        let src = self.unwrap_bignum_ptr(v);
+                        let dst = self.compile_bignum_factorial(src);
                         let wrapped = self.wrap_bignum_ptr(dst);
                         self.bignum_temps.push((dst, wrapped));
                         wrapped
@@ -1205,6 +1219,110 @@ impl<'ctx> Codegen<'ctx> {
 
         self.builder.position_at_end(end_bb);
         let final_wrapped = self.builder.build_load(bignum_ty, result_slot, "tet_bignum_final").unwrap();
+        self.unwrap_bignum_ptr(final_wrapped)
+    }
+
+    /// Postfix `!` on `num`/`numw`: `n` is only known at runtime, so this is
+    /// an actual loop (mirroring `compile_tetration`'s shape), multiplying
+    /// 1 by every whole number from 2 up to `n`. Counter stays an i64 for
+    /// loop control; converted to float each step to multiply into the
+    /// running product.
+    fn compile_factorial(&mut self, n: FloatValue<'ctx>) -> FloatValue<'ctx> {
+        let function = self.current_function();
+        let i64_ty = self.context.i64_type();
+        let f64_ty = self.context.f64_type();
+
+        let n_int = self.builder.build_float_to_signed_int(n, i64_ty, "fact_n").unwrap();
+
+        let result_slot = self.builder.build_alloca(f64_ty, "fact_result").unwrap();
+        self.builder.build_store(result_slot, f64_ty.const_float(1.0)).unwrap();
+        let counter_slot = self.builder.build_alloca(i64_ty, "fact_i").unwrap();
+        self.builder.build_store(counter_slot, i64_ty.const_int(2, true)).unwrap();
+
+        let cond_bb = self.context.append_basic_block(function, "fact_cond");
+        let body_bb = self.context.append_basic_block(function, "fact_body");
+        let end_bb = self.context.append_basic_block(function, "fact_end");
+        self.builder.build_unconditional_branch(cond_bb).unwrap();
+
+        self.builder.position_at_end(cond_bb);
+        let counter = self.builder.build_load(i64_ty, counter_slot, "fact_i_load").unwrap().into_int_value();
+        let keep_going = self
+            .builder
+            .build_int_compare(IntPredicate::SLE, counter, n_int, "fact_test")
+            .unwrap();
+        self.builder.build_conditional_branch(keep_going, body_bb, end_bb).unwrap();
+
+        self.builder.position_at_end(body_bb);
+        let current = self.builder.build_load(f64_ty, result_slot, "fact_result_load").unwrap().into_float_value();
+        let counter_f = self.builder.build_signed_int_to_float(counter, f64_ty, "fact_i_f").unwrap();
+        let next = self.builder.build_float_mul(current, counter_f, "fact_mul").unwrap();
+        self.builder.build_store(result_slot, next).unwrap();
+        let counter_next = self.builder.build_int_add(counter, i64_ty.const_int(1, true), "fact_i_next").unwrap();
+        self.builder.build_store(counter_slot, counter_next).unwrap();
+        self.builder.build_unconditional_branch(cond_bb).unwrap();
+
+        self.builder.position_at_end(end_bb);
+        self.builder.build_load(f64_ty, result_slot, "fact_final").unwrap().into_float_value()
+    }
+
+    /// bignum's postfix `!`, same shape as `compile_bignum_tetration` --
+    /// each step's destination is a fresh heap handle, so the previous
+    /// step's handle is explicitly freed before being overwritten, and the
+    /// per-step multiplier (the loop counter, always a small whole number)
+    /// is built via `bignum_set_d` and freed once consumed. Returns a raw
+    /// (unwrapped) handle, matching the tetration/shim_fn convention.
+    fn compile_bignum_factorial(&mut self, n: PointerValue<'ctx>) -> PointerValue<'ctx> {
+        let function = self.current_function();
+        let i64_ty = self.context.i64_type();
+        let f64_ty = self.context.f64_type();
+        let bignum_ty = self.bignum_struct_type();
+
+        let n_int = self
+            .builder
+            .build_call(self.bignum.get_i64, &[n.into()], "fact_bignum_n")
+            .unwrap()
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_int_value();
+
+        let initial = self.bignum_new(DEFAULT_BIGNUM_PRECISION);
+        self.builder.build_call(self.bignum.set_d, &[initial.into(), f64_ty.const_float(1.0).into()], "fact_bignum_init").unwrap();
+        let result_slot = self.builder.build_alloca(bignum_ty, "fact_bignum_result").unwrap();
+        self.builder.build_store(result_slot, self.wrap_bignum_ptr(initial)).unwrap();
+        let counter_slot = self.builder.build_alloca(i64_ty, "fact_bignum_i").unwrap();
+        self.builder.build_store(counter_slot, i64_ty.const_int(2, true)).unwrap();
+
+        let cond_bb = self.context.append_basic_block(function, "fact_bignum_cond");
+        let body_bb = self.context.append_basic_block(function, "fact_bignum_body");
+        let end_bb = self.context.append_basic_block(function, "fact_bignum_end");
+        self.builder.build_unconditional_branch(cond_bb).unwrap();
+
+        self.builder.position_at_end(cond_bb);
+        let counter = self.builder.build_load(i64_ty, counter_slot, "fact_bignum_i_load").unwrap().into_int_value();
+        let keep_going = self
+            .builder
+            .build_int_compare(IntPredicate::SLE, counter, n_int, "fact_bignum_test")
+            .unwrap();
+        self.builder.build_conditional_branch(keep_going, body_bb, end_bb).unwrap();
+
+        self.builder.position_at_end(body_bb);
+        let current_wrapped = self.builder.build_load(bignum_ty, result_slot, "fact_bignum_result_load").unwrap();
+        let current_ptr = self.unwrap_bignum_ptr(current_wrapped);
+        let counter_f = self.builder.build_signed_int_to_float(counter, f64_ty, "fact_bignum_i_f").unwrap();
+        let counter_bignum = self.bignum_new(DEFAULT_BIGNUM_PRECISION);
+        self.builder.build_call(self.bignum.set_d, &[counter_bignum.into(), counter_f.into()], "fact_bignum_i_set").unwrap();
+        let next = self.bignum_new(DEFAULT_BIGNUM_PRECISION);
+        self.builder.build_call(self.bignum.mul, &[next.into(), current_ptr.into(), counter_bignum.into()], "fact_bignum_mul").unwrap();
+        self.free_bignum_ptr(current_ptr);
+        self.free_bignum_ptr(counter_bignum);
+        self.builder.build_store(result_slot, self.wrap_bignum_ptr(next)).unwrap();
+        let counter_next = self.builder.build_int_add(counter, i64_ty.const_int(1, true), "fact_bignum_i_next").unwrap();
+        self.builder.build_store(counter_slot, counter_next).unwrap();
+        self.builder.build_unconditional_branch(cond_bb).unwrap();
+
+        self.builder.position_at_end(end_bb);
+        let final_wrapped = self.builder.build_load(bignum_ty, result_slot, "fact_bignum_final").unwrap();
         self.unwrap_bignum_ptr(final_wrapped)
     }
 

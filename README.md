@@ -12,7 +12,7 @@ CyborgPL is a hobby programming language that compiles to native machine code vi
 - `if`/`else`, `while`, and real lexical block scoping (a variable declared inside a block is gone once the block ends).
 - Every value (a literal or a `ref:var:type 'name'` reference) must be individually wrapped in `( )` to be used in any expression — `(a) + (b)`, not `a + b`. A reassignment's target is the one exception (`ref:var:type 'name' = ...` stays bare, since it's a place, not a value); a function call doesn't need an extra wrap around the whole call either, though each argument still needs its own.
 - `print*"literal text" (expr) "more text"*;` — literal and computed segments mixed freely; a computed segment needs no separate marker of its own since every value already starts with `(` (or a function-call name), which is enough to tell it apart from literal text.
-- Math operators: `x` (multiply), `xx` (power), `xxx` (tetration), plus the usual comparisons and boolean logic.
+- Math operators: `x` (multiply), `xx` (power), `xxx` (tetration), postfix `!` (factorial, on `num`/`numw`/`bignum`), plus the usual comparisons and boolean logic.
 - Variables can share a name across different types, disambiguated by the type stated at each reference site.
 - `num` supports selectable precision — `[precision:16/32/64/128]` — including a from-scratch software implementation of IEEE-754 quad precision (128-bit), since Apple's toolchain has no native support for it.
 - `bignum`: arbitrary-precision decimal via GMP, with automatic memory management (handles are freed when they go out of scope, get reassigned, or a function returns) — no manual `free` needed. `xx`/`xxx`/unary negation/comparisons (`<`, `==`, etc.) all work on it, including as `if`/`while` conditions. A bare numeric literal (`var:bignum 'x' = (999999999999999999999999999999999999999);`) keeps its full precision — the parser preserves a literal's original digit text specifically for this. `bignum` can also mix directly with `num`/`numw` in an expression (e.g. `(ref:var:bignum 'n') - (1)`) — the plain side is promoted to a `bignum` automatically.
@@ -96,6 +96,7 @@ The language design is mine; Claude Code implemented it. To be specific about wh
 - `func 'name'*param, ...*` — replacing the original defaulted `fn` keyword and `( )` parameter list with `func` and `*...*`, matching `print`'s own bracketing style and the `ref:func` call syntax
 - `ref:func 'name'*arg, ...*` — replacing the original defaulted bare `'name'(...)` call syntax, mirroring `ref:var:TYPE 'name'`'s shape for reading a variable
 - `not` / `not=` — replacing the originally-defaulted `!` (boolean not) and `!=` (not-equal) entirely
+- Postfix `!` for factorial, reusing the character freed up by the `not`/`not=` rename, on `num`/`numw`/`bignum`
 
 **Defaulted by Claude** (conventional choices from the first scaffolding commit, never revisited):
 - `if`/`else`/`while` keywords and brace-delimited blocks

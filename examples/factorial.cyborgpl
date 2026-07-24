@@ -1,0 +1,14 @@
+START
+
+var:num 'n' = (5);
+print*"5! = " (ref:var:num 'n')!*;
+
+var:bignum 'big' = (20);
+print*"20! (bignum) = " (ref:var:bignum 'big')!*;
+
+var:numw 'w' = '10';
+print*"10! (numw) = " (ref:var:numw 'w')!*;
+
+print*"double factorial-chain (3)!! = " (3)!!*;
+
+END

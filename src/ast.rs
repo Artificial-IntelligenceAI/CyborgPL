@@ -49,6 +49,9 @@ pub enum BinOp {
 pub enum UnOp {
     Neg,
     Not,
+    /// Postfix `!`: factorial. Unlike `Neg`/`Not`, this attaches after its
+    /// operand rather than before it (see `parse_postfix`).
+    Factorial,
 }
 
 #[derive(Debug, Clone)]

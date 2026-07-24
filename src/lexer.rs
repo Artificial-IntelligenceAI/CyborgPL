@@ -70,6 +70,7 @@ impl<'a> Lexer<'a> {
                     Token::Eq
                 }
             }
+            '!' => Token::Bang,
             '<' => {
                 if self.peek_char() == Some('=') {
                     self.chars.next();

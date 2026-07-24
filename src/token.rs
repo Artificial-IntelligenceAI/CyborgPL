@@ -64,6 +64,9 @@ pub enum Token {
     Not,
     /// `not=` (not-equal comparison), written as one word with no space.
     NotEq,
+    /// Postfix `!`: factorial. Freed up for this once `not`/`not=` replaced
+    /// `!`/`!=` as the boolean operators.
+    Bang,
     Lt,      // <
     Gt,      // >
     LtEq,    // <=
