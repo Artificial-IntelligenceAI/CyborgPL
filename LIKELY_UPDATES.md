@@ -13,7 +13,7 @@ A running note of things that have come up as likely next steps or known gaps wh
 
 - `str` now has runtime construction via `stch` and real memory management (every `str` in a variable is its own `strdup`'d copy, freed at scope exit/reassignment/return, mirroring `bignum`). One accepted inefficiency: a value stored somewhere always gets its own fresh copy even when the source was already an unshared temporary (a `stch` result, a str-returning call) — a redundant extra copy in that case, same simplification already accepted for `bignum`.
 - Intermediate bignum binary-op results always compute at the default precision (256 bits) regardless of operand precision, unlike `num`'s "widen to the larger operand" behavior.
-- No LLVM optimization passes run on generated code (`mem2reg`, inlining, etc.) — deliberately deprioritized until the language's basics are finished.
+- `mem2reg` now runs before object-file emission (promotes alloca/store/load into plain SSA values wherever safe). Nothing beyond it yet — inlining, dead code elimination, constant folding across function boundaries, etc. are all still deliberately deprioritized.
 - The new type checker (`src/typecheck.rs`) only checks *shape* compatibility, not value validity — e.g. `var:bignum 'x' = (ref:var:str 'y');` type-checks fine (`str` is a valid bignum source, for numeric-literal text like `"3.14"`), but if `'y'` holds actual non-numeric text, that's still only caught at runtime (or not caught at all -- `bignum_set_str` on garbage input is undefined). Deliberately out of scope for a checker that mirrors codegen's existing coercion rules rather than adding new restrictions.
 
 ## Bigger, not-yet-started ideas

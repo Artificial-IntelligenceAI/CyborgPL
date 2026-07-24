@@ -4,6 +4,7 @@ use std::path::Path;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
+use inkwell::passes::PassBuilderOptions;
 use inkwell::targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine};
 use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum, FloatType, StructType};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FloatValue, FunctionValue, PointerValue};
@@ -280,6 +281,15 @@ impl<'ctx> Codegen<'ctx> {
                 CodeModel::Default,
             )
             .ok_or("failed to create target machine for this host")?;
+
+        // Every `var:` currently compiles to an alloca + store/load, even
+        // when the value never needs to live in memory at all -- mem2reg
+        // promotes those into plain SSA values wherever it's safe to,
+        // which is effectively always here (no address-of, no pointers
+        // exposed to source programs, nothing that could alias an alloca).
+        self.module
+            .run_passes("mem2reg", &target_machine, PassBuilderOptions::create())
+            .map_err(|e| e.to_string())?;
 
         target_machine
             .write_to_file(&self.module, FileType::Object, path)
