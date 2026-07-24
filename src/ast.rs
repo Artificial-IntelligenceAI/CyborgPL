@@ -53,7 +53,12 @@ pub enum UnOp {
 
 #[derive(Debug, Clone)]
 pub enum Expr {
-    Num(f64),
+    /// The parsed value, and its original literal text (empty if this
+    /// wasn't a direct digit literal, e.g. numw's computed value). Only
+    /// consulted when coercing a bare literal into a `bignum`, which can
+    /// hold far more precision than the `f64` alone preserves; every other
+    /// use of a Num just reads the parsed value.
+    Num(f64, String),
     Bool(bool),
     Str(String),
     /// A variable reference: `ref:var:TYPE 'name'`. Carries the type stated

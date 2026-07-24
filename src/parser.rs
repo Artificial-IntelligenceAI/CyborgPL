@@ -118,7 +118,7 @@ impl Parser {
         }
         self.expect(Token::Colon)?;
         let n = match self.peek().clone() {
-            Token::Num(n) => {
+            Token::Num(n, _) => {
                 self.advance();
                 n
             }
@@ -165,7 +165,11 @@ impl Parser {
             Token::Quoted(word) => {
                 self.advance();
                 let value = parse_numw_string(&word).map_err(|e| format!("line {line}: {e}"))?;
-                Ok(Some(Expr::Num(value)))
+                // Not a direct digit literal (it's computed from the
+                // word-form text), so there's no "original text" to
+                // preserve beyond what the f64 already holds -- numw
+                // itself is always f64-bounded regardless.
+                Ok(Some(Expr::Num(value, format!("{value}"))))
             }
             _ => Ok(None),
         }
@@ -463,9 +467,9 @@ impl Parser {
     /// directly inside a required `( )` wrapper.
     fn parse_wrapped_atom(&mut self) -> PResult<Expr> {
         match self.peek().clone() {
-            Token::Num(n) => {
+            Token::Num(n, text) => {
                 self.advance();
-                Ok(Expr::Num(n))
+                Ok(Expr::Num(n, text))
             }
             Token::Str(s) => {
                 self.advance();

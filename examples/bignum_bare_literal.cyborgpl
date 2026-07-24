@@ -1,0 +1,12 @@
+START
+
+var:bignum 'x' = (999999999999999999999999999999999999999);
+print*"bare literal, full precision: " (ref:var:bignum 'x')*;
+
+ref:var:bignum 'x' = (888888888888888888888888888888888888888);
+print*"reassigned with a bare literal: " (ref:var:bignum 'x')*;
+
+var:bignum 'y' = (999999999999999999999999999999999999999) [precision:1000];
+print*"bare literal at 1000-bit precision: " (ref:var:bignum[precision:1000] 'y')*;
+
+END

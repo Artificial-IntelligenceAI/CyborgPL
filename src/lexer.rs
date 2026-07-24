@@ -151,7 +151,8 @@ impl<'a> Lexer<'a> {
             }
         }
 
-        Token::Num(s.parse().expect("validated numeral must parse as f64"))
+        let value = s.parse().expect("validated numeral must parse as f64");
+        Token::Num(value, s)
     }
 
     /// Any character is allowed between the quotes (a deliberate choice --

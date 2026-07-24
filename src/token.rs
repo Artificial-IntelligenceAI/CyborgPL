@@ -1,7 +1,11 @@
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     // Literals and identifiers
-    Num(f64),
+    /// The parsed value, and the original digit text as written (no sign --
+    /// unary minus is handled at the parser level). The raw text matters
+    /// for `bignum`, which can represent far more precision than `f64`
+    /// holds; every other consumer just uses the parsed value.
+    Num(f64, String),
     Str(String),
     Ident(String),
     /// A single-quoted name, e.g. 'name'. Any character is allowed inside

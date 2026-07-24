@@ -370,6 +370,27 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
+    /// Compiles `expr` and coerces it to `ty` -- the `compile_expr` +
+    /// `coerce_to_type` pair every storage/passing boundary (variable
+    /// declaration, reassignment, function argument, return value) needs.
+    /// Special-cased for a direct bare numeric literal assigned to a
+    /// `bignum`: `compile_expr` would otherwise produce a lossy `f64`
+    /// (`Token::Num` already lost precision beyond ~17 digits at the
+    /// lexer stage, same as `num` always has), so the literal's original
+    /// text is routed through the same `bignum_set_str` path a
+    /// double-quoted string literal already uses instead, preserving
+    /// however many digits were actually written. Only a *direct* literal
+    /// benefits -- `var:bignum 'x' = 1 + 2;` still goes through `f64` for
+    /// the addition itself, same as before.
+    fn compile_and_coerce(&mut self, expr: &Expr, ty: Type) -> Result<BasicValueEnum<'ctx>, String> {
+        if let (Expr::Num(_, text), Type::BigNum(_)) = (expr, ty) {
+            let text_ptr = self.builder.build_global_string_ptr(text, "bignum_lit").unwrap().as_pointer_value();
+            return Ok(self.coerce_to_type(text_ptr.into(), ty));
+        }
+        let value = self.compile_expr(expr)?;
+        Ok(self.coerce_to_type(value, ty))
+    }
+
     /// Widens the narrower of two floats to match the wider one, so binary
     /// ops always see matching operand types. No-op if they already match
     /// or aren't both floats.
@@ -593,8 +614,7 @@ impl<'ctx> Codegen<'ctx> {
     fn compile_stmt(&mut self, stmt: &Stmt) -> Result<(), String> {
         match stmt {
             Stmt::VarDecl(name, ty, expr) => {
-                let value = self.compile_expr(expr)?;
-                let value = self.coerce_to_type(value, *ty);
+                let value = self.compile_and_coerce(expr, *ty)?;
                 let key = (name.clone(), *ty);
 
                 // Re-declaring a bignum name that's already alive (same
@@ -611,8 +631,7 @@ impl<'ctx> Codegen<'ctx> {
                 self.variables.insert(key, (alloca, llvm_ty));
             }
             Stmt::Assign(name, ty, expr) => {
-                let value = self.compile_expr(expr)?;
-                let value = self.coerce_to_type(value, *ty);
+                let value = self.compile_and_coerce(expr, *ty)?;
                 let key = (name.clone(), *ty);
                 let (ptr, _ty) = *self
                     .variables
@@ -628,21 +647,23 @@ impl<'ctx> Codegen<'ctx> {
                 self.builder.build_store(ptr, value).unwrap();
             }
             Stmt::Return(expr) => {
-                let value = match expr {
-                    Some(e) => Some(self.compile_expr(e)?),
+                // Coerced (via compile_and_coerce, so a bare bignum literal
+                // still gets its full precision) to the function's
+                // declared return type *before* anything below gets freed.
+                // For bignum this always makes an independent copy (same
+                // as storing into any variable or argument already does)
+                // -- which means whatever the source was (a named
+                // variable, a computed bignum_temps intermediate) is safe
+                // to free unconditionally afterward, since the coerced
+                // copy never aliases it. This also closes the old
+                // Expr::Call bignum leak: a caller now always receives its
+                // own fresh handle, never one it has to guess whether it
+                // owns.
+                let return_ty = self.current_return_type;
+                let coerced = match expr {
+                    Some(e) => Some(self.compile_and_coerce(e, return_ty)?),
                     None => None,
                 };
-                // Coerced to the function's declared return type *before*
-                // anything below gets freed. For bignum this always makes
-                // an independent copy (same as storing into any variable
-                // or argument already does) -- which means whatever the
-                // source was (a named variable, a computed bignum_temps
-                // intermediate) is safe to free unconditionally afterward,
-                // since the coerced copy never aliases it. This also
-                // closes the old Expr::Call bignum leak: a caller now
-                // always receives its own fresh handle, never one it has
-                // to guess whether it owns.
-                let coerced = value.map(|v| self.coerce_to_type(v, self.current_return_type));
 
                 let temps: Vec<(PointerValue<'ctx>, BasicValueEnum<'ctx>)> = self.bignum_temps.drain(..).collect();
                 for (ptr, _) in temps {
@@ -795,7 +816,7 @@ impl<'ctx> Codegen<'ctx> {
 
     fn compile_expr(&mut self, expr: &Expr) -> Result<BasicValueEnum<'ctx>, String> {
         Ok(match expr {
-            Expr::Num(n) => self.context.f64_type().const_float(*n).into(),
+            Expr::Num(n, _) => self.context.f64_type().const_float(*n).into(),
             Expr::Bool(b) => self.context.bool_type().const_int(*b as u64, false).into(),
             Expr::Str(s) => self.builder.build_global_string_ptr(s, "str").unwrap().as_pointer_value().into(),
             Expr::Var(name, ty) => {
@@ -1000,10 +1021,7 @@ impl<'ctx> Codegen<'ctx> {
         let arg_values: Vec<BasicMetadataValueEnum> = args
             .iter()
             .zip(param_types.iter())
-            .map(|(a, &pty)| {
-                let v = self.compile_expr(a)?;
-                Ok(self.coerce_to_type(v, pty).into())
-            })
+            .map(|(a, &pty)| Ok(self.compile_and_coerce(a, pty)?.into()))
             .collect::<Result<_, String>>()?;
         let call = self.builder.build_call(function, &arg_values, "call").unwrap();
         let result = call.try_as_basic_value().basic();

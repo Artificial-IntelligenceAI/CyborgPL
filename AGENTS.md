@@ -24,7 +24,6 @@ This codebase has a strong established pattern: nothing gets reported as working
 
 ## Known rough edges (not secrets, just current state)
 
-- Bare numeric literals assigned to `bignum` lose precision beyond ~17 digits (they route through `f64` at the lexer stage, same as `num`). Use a double-quoted string literal for high-precision `bignum` values instead.
 - Intermediate bignum binary-op results always compute at the default precision (256 bits), regardless of the operands' own precision.
 
 If you're fixing or extending any of the above, the fix belongs in `src/codegen.rs`'s bignum handling — read the surrounding comments there first, they explain the reasoning, not just the mechanism.
