@@ -201,6 +201,19 @@ impl Parser {
                 self.expect(Token::Semicolon)?;
                 Ok(Stmt::VarDecl(name, ty, value))
             }
+            // `input:type 'name';` -- no value expression to follow, so
+            // (unlike var's trailing-precision placement, which comes after
+            // the value) `[precision:N]` sits right after the type here,
+            // matching `ref:var:type[precision:N] 'name'`'s own ordering.
+            Token::Input => {
+                self.advance();
+                self.expect(Token::Colon)?;
+                let ty = self.parse_type()?;
+                let ty = self.parse_optional_precision(ty)?;
+                let name = self.expect_quoted_ident()?;
+                self.expect(Token::Semicolon)?;
+                Ok(Stmt::Input(name, ty))
+            }
             // `ref:func 'name'*args*;` (calling a function as a statement,
             // e.g. one that just prints and returns nothing) versus
             // `ref:var:TYPE ...` (a reassignment or a bare variable

@@ -1,0 +1,7 @@
+START
+
+print*"Enter your name: "*;
+input:str 'name';
+print*"Hello, " (ref:var:str 'name') stch ("!")*;
+
+END

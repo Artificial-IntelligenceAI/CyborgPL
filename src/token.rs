@@ -29,6 +29,8 @@ pub enum Token {
     True,
     False,
     Print,
+    /// `input:type 'name';` -- reads a line from stdin into a new variable.
+    Input,
     /// Marks the start of the program's entry point block (replaces `fn main`).
     Start,
     End,
@@ -92,6 +94,7 @@ impl Token {
             "true" => Some(Token::True),
             "false" => Some(Token::False),
             "print" => Some(Token::Print),
+            "input" => Some(Token::Input),
             "not" => Some(Token::Not),
             "START" => Some(Token::Start),
             "END" => Some(Token::End),

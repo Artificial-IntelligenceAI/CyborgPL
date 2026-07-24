@@ -38,4 +38,12 @@ fn main() {
     println!("cargo:rustc-env=CYBORGPL_BIGNUM_LIB={out_dir}/libcyborgpl_bignum.a");
     println!("cargo:rustc-env=CYBORGPL_GMP_LIB_DIR={gmp_prefix}/lib");
     println!("cargo:rerun-if-changed=runtime/gmp/bignum_shim.c");
+
+    cc::Build::new()
+        .file("runtime/io/input_shim.c")
+        .opt_level(2)
+        .flag("-mmacosx-version-min=26.0")
+        .compile("cyborgpl_io");
+    println!("cargo:rustc-env=CYBORGPL_IO_LIB={out_dir}/libcyborgpl_io.a");
+    println!("cargo:rerun-if-changed=runtime/io/input_shim.c");
 }

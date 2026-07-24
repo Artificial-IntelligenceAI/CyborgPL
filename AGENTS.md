@@ -16,6 +16,7 @@ Backend/implementation choices — how codegen works internally, which crate to 
 - `src/main.rs` — CLI entry point; compiles a `.cyborgpl` file (or a built-in demo) to an object file, links it with `cc`, then **runs the result as a child process**. If you're ever measuring the compiled program's memory/CPU behavior, measure that child process (`/tmp/cyborgpl_out`), not the `CyborgPL` binary itself — they're different processes and conflating them gives meaningless numbers.
 - `runtime/fp128/quadmath.c` — a from-scratch software implementation of IEEE-754 quad precision (128-bit floats), since Apple's toolchain has no native 128-bit float type. `runtime/fp128/test_quadmath.c` is its standalone correctness harness (run it directly if you ever touch `quadmath.c`).
 - `runtime/gmp/bignum_shim.c` — a thin C wrapper around GMP's `mpf_t`, giving `bignum` simple fixed function signatures to call from LLVM IR.
+- `runtime/io/input_shim.c` — backs `input:str`/`input:num`, reading a line from stdin via `getline`.
 - `examples/*.cyborgpl` — working example programs, all verified to actually run, not just written and assumed correct.
 
 ## Verify, don't assume

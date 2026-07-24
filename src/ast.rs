@@ -89,6 +89,10 @@ pub enum PrintSegment {
 #[derive(Debug, Clone)]
 pub enum Stmt {
     VarDecl(String, Type, Expr),
+    /// `input:type 'name';` -- declares 'name' and reads its value from
+    /// stdin at runtime, rather than from a compiled expression. Currently
+    /// only `Str` and `Num` support this.
+    Input(String, Type),
     Assign(String, Type, Expr),
     Return(Option<Expr>),
     Print(Vec<PrintSegment>),

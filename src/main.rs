@@ -86,6 +86,7 @@ fn main() {
         .arg(env!("CYBORGPL_BIGNUM_LIB")) // our GMP shim, for bignum
         .arg(format!("-L{}", env!("CYBORGPL_GMP_LIB_DIR")))
         .arg("-lgmp")
+        .arg(env!("CYBORGPL_IO_LIB")) // our stdin shim, for input:str/input:num
         .status()
         .expect("failed to invoke cc");
     if !status.success() {

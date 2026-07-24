@@ -6,10 +6,9 @@
 //
 // A `bignum` handle is a malloc'd mpf_t, freed via bignum_free once
 // codegen determines (via scope-exit/reassignment tracking) that nothing
-// references it anymore. bignum_to_string's return value is still never
-// freed -- a leaked but valid C string, safe to print -- since it's only
-// ever handed straight to printf and CyborgPL has no other string
-// lifetime story yet.
+// references it anymore. bignum_to_string's return value is a plain
+// malloc'd C string, freed by codegen (a normal libc free()) once whatever
+// consumed it (printf, or `stch`) is done reading it.
 
 #include <gmp.h>
 #include <stdlib.h>

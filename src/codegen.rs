@@ -116,6 +116,12 @@ pub struct Codegen<'ctx> {
     malloc_fn: FunctionValue<'ctx>,
     snprintf_fn: FunctionValue<'ctx>,
     strdup_fn: FunctionValue<'ctx>,
+    /// runtime/io/input_shim.c -- `input:str`/`input:num`, reading a line
+    /// from stdin. `read_line_fn`'s result is already a fresh malloc'd
+    /// buffer (getline's own allocation), adopted directly as a `str`
+    /// value with no extra strdup needed.
+    read_line_fn: FunctionValue<'ctx>,
+    read_num_fn: FunctionValue<'ctx>,
     bignum: BignumFns<'ctx>,
 }
 
@@ -146,6 +152,12 @@ impl<'ctx> Codegen<'ctx> {
 
         let strdup_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
         let strdup_fn = module.add_function("strdup", strdup_type, Some(Linkage::External));
+
+        let read_line_type = i8_ptr.fn_type(&[], false);
+        let read_line_fn = module.add_function("cyborg_read_line", read_line_type, Some(Linkage::External));
+
+        let read_num_type = f64_type.fn_type(&[], false);
+        let read_num_fn = module.add_function("cyborg_read_num", read_num_type, Some(Linkage::External));
 
         // runtime/gmp/bignum_shim.c -- every handle is an opaque i8_ptr, so
         // these signatures are the same shape regardless of what GMP itself
@@ -238,6 +250,8 @@ impl<'ctx> Codegen<'ctx> {
             malloc_fn,
             snprintf_fn,
             strdup_fn,
+            read_line_fn,
+            read_num_fn,
             bignum,
         }
     }
@@ -704,6 +718,48 @@ impl<'ctx> Codegen<'ctx> {
                         _ => {}
                     }
                 }
+
+                let llvm_ty = self.basic_type(*ty);
+                let alloca = self.builder.build_alloca(llvm_ty, name).unwrap();
+                self.builder.build_store(alloca, value).unwrap();
+                self.declare_scoped(key.clone());
+                self.variables.insert(key, (alloca, llvm_ty));
+            }
+            Stmt::Input(name, ty) => {
+                let key = (name.clone(), *ty);
+
+                // Same redeclare-vs-shadow distinction as VarDecl above.
+                if self.declared_in_current_scope(&key) {
+                    match *ty {
+                        Type::BigNum(_) => self.free_bignum_var(&key),
+                        Type::Str => self.free_str_var(&key),
+                        _ => {}
+                    }
+                }
+
+                let value: BasicValueEnum = match *ty {
+                    // cyborg_read_line's result is already a fresh, owned
+                    // malloc'd buffer -- adopted directly, no strdup needed.
+                    Type::Str => self
+                        .builder
+                        .build_call(self.read_line_fn, &[], "read_line_call")
+                        .unwrap()
+                        .try_as_basic_value()
+                        .basic()
+                        .unwrap(),
+                    Type::Num(width) => {
+                        let raw = self
+                            .builder
+                            .build_call(self.read_num_fn, &[], "read_num_call")
+                            .unwrap()
+                            .try_as_basic_value()
+                            .basic()
+                            .unwrap()
+                            .into_float_value();
+                        self.coerce_float(raw, width).into()
+                    }
+                    other => panic!("input not supported for {other:?} yet"),
+                };
 
                 let llvm_ty = self.basic_type(*ty);
                 let alloca = self.builder.build_alloca(llvm_ty, name).unwrap();
