@@ -213,6 +213,7 @@ impl<'ctx> Codegen<'ctx> {
     fn basic_type(&self, ty: Type) -> BasicTypeEnum<'ctx> {
         match ty {
             Type::Num(width) => self.float_type_for(width).into(),
+            Type::NumW => self.float_type_for(DEFAULT_NUM_PRECISION).into(),
             Type::Bool => self.context.bool_type().into(),
             Type::Str => self.context.ptr_type(AddressSpace::default()).into(),
             Type::BigNum(_) => self.bignum_struct_type().into(),
@@ -332,6 +333,7 @@ impl<'ctx> Codegen<'ctx> {
     fn coerce_to_type(&self, value: BasicValueEnum<'ctx>, ty: Type) -> BasicValueEnum<'ctx> {
         match (value, ty) {
             (BasicValueEnum::FloatValue(f), Type::Num(width)) => self.coerce_float(f, width).into(),
+            (BasicValueEnum::FloatValue(f), Type::NumW) => self.coerce_float(f, DEFAULT_NUM_PRECISION).into(),
             (_, Type::BigNum(precision)) => self.coerce_to_bignum(value, precision),
             _ => value,
         }
@@ -434,6 +436,7 @@ impl<'ctx> Codegen<'ctx> {
 
         let fn_type = match f.return_type {
             Type::Num(width) => self.float_type_for(width).fn_type(&param_types, false),
+            Type::NumW => self.float_type_for(DEFAULT_NUM_PRECISION).fn_type(&param_types, false),
             Type::Bool => self.context.bool_type().fn_type(&param_types, false),
             Type::Str => self.context.ptr_type(AddressSpace::default()).fn_type(&param_types, false),
             Type::BigNum(_) => self.bignum_struct_type().fn_type(&param_types, false),
@@ -493,6 +496,10 @@ impl<'ctx> Codegen<'ctx> {
                 }
                 Type::Num(width) => {
                     let zero = self.float_type_for(width).const_float(0.0);
+                    self.builder.build_return(Some(&zero)).unwrap();
+                }
+                Type::NumW => {
+                    let zero = self.float_type_for(DEFAULT_NUM_PRECISION).const_float(0.0);
                     self.builder.build_return(Some(&zero)).unwrap();
                 }
                 Type::Bool => {

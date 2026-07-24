@@ -10,6 +10,7 @@ A running note of things that have come up as likely next steps or known gaps wh
 - Bignum through function parameters and return types — currently unsupported and untested.
 - Higher hyperoperator levels beyond `xxx` (tetration), if ever wanted.
 - Whether real lexical block scoping (added for automatic bignum cleanup) should extend further — e.g. shadowing edge cases, function-parameter scoping.
+- `numw`'s magnitude-word vocabulary is currently a fixed list (thousand/million/billion/trillion/quadrillion/quintillion) and only accepts one word after the number — no compound number words (`'one hundred thousand'`) and no expanding the list without a design decision.
 
 ## Known implementation gaps
 

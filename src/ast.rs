@@ -6,6 +6,12 @@ pub enum Type {
     /// different types for the purposes of same-name variable sharing, same
     /// as Num/Bool/Str already do.
     Num(u32),
+    /// "Number word": a Num in every runtime respect (always 64-bit, same
+    /// arithmetic/storage), but a fully separate type for the purposes of
+    /// same-name variable sharing -- distinguished only by accepting an
+    /// additional literal form, `'1 million'`-style quoted number-words,
+    /// alongside the usual numeric expressions Num already accepts.
+    NumW,
     Bool,
     Str,
     /// Arbitrary-precision decimal (GMP's mpf_t), a fully separate type from

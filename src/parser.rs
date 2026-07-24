@@ -91,6 +91,7 @@ impl Parser {
         let name = self.expect_ident()?;
         match name.as_str() {
             "num" => Ok(Type::Num(DEFAULT_NUM_PRECISION)),
+            "numw" => Ok(Type::NumW),
             "bool" => Ok(Type::Bool),
             "str" => Ok(Type::Str),
             "bignum" => Ok(Type::BigNum(DEFAULT_BIGNUM_PRECISION)),
@@ -142,6 +143,26 @@ impl Parser {
         }
     }
 
+    /// If `ty` is `numw` and the next token is a quoted number-word literal
+    /// (`'1 million'`), consumes it and returns the computed value. Otherwise
+    /// leaves the parser untouched and returns `None` -- numw still accepts
+    /// any ordinary numeric expression too, this is just an extra literal
+    /// form layered on top, not a replacement for the general grammar.
+    fn try_parse_numw_literal(&mut self, ty: Type) -> PResult<Option<Expr>> {
+        if ty != Type::NumW {
+            return Ok(None);
+        }
+        let line = self.tokens[self.pos].line;
+        match self.peek().clone() {
+            Token::Quoted(word) => {
+                self.advance();
+                let value = parse_numw_string(&word).map_err(|e| format!("line {line}: {e}"))?;
+                Ok(Some(Expr::Num(value)))
+            }
+            _ => Ok(None),
+        }
+    }
+
     fn parse_block(&mut self) -> PResult<Block> {
         self.expect(Token::LBrace)?;
         let mut stmts = Vec::new();
@@ -160,7 +181,10 @@ impl Parser {
                 let ty = self.parse_type()?;
                 let name = self.expect_quoted_ident()?;
                 self.expect(Token::Eq)?;
-                let value = self.parse_expr()?;
+                let value = match self.try_parse_numw_literal(ty)? {
+                    Some(v) => v,
+                    None => self.parse_expr()?,
+                };
                 let ty = self.parse_optional_precision(ty)?;
                 self.expect(Token::Semicolon)?;
                 Ok(Stmt::VarDecl(name, ty, value))
@@ -181,7 +205,10 @@ impl Parser {
                         ));
                     };
                     self.advance();
-                    let value = self.parse_expr()?;
+                    let value = match self.try_parse_numw_literal(ty)? {
+                        Some(v) => v,
+                        None => self.parse_expr()?,
+                    };
                     self.expect(Token::Semicolon)?;
                     return Ok(Stmt::Assign(name, ty, value));
                 }
@@ -498,4 +525,33 @@ impl Parser {
             )),
         }
     }
+}
+
+/// Parses a numw literal's content: an optional leading `-`, a whole or
+/// decimal number, and an optional trailing magnitude word (`thousand`,
+/// `million`, `billion`, `trillion`, `quadrillion`, `quintillion`, matched
+/// case-insensitively). A bare number with no word is just that number
+/// (scale of 1) -- the word is additive, not required.
+fn parse_numw_string(s: &str) -> Result<f64, String> {
+    let s = s.trim();
+    let (number_part, word_part) = match s.rsplit_once(char::is_whitespace) {
+        Some((n, w)) => (n.trim(), Some(w.trim())),
+        None => (s, None),
+    };
+    let base: f64 = number_part
+        .parse()
+        .map_err(|_| format!("invalid numw literal '{s}': '{number_part}' isn't a number"))?;
+    let scale = match word_part {
+        None => 1.0,
+        Some(word) => match word.to_lowercase().as_str() {
+            "thousand" => 1e3,
+            "million" => 1e6,
+            "billion" => 1e9,
+            "trillion" => 1e12,
+            "quadrillion" => 1e15,
+            "quintillion" => 1e18,
+            other => return Err(format!("invalid numw literal '{s}': unrecognized magnitude word '{other}'")),
+        },
+    };
+    Ok(base * scale)
 }

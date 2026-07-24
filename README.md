@@ -14,7 +14,8 @@ CyborgPL is a hobby programming language that compiles to native machine code vi
 - Math operators: `x` (multiply), `xx` (power), `xxx` (tetration), plus the usual comparisons and boolean logic.
 - Variables can share a name across different types, disambiguated by the type stated at each reference site.
 - `num` supports selectable precision — `[precision:16/32/64/128]` — including a from-scratch software implementation of IEEE-754 quad precision (128-bit), since Apple's toolchain has no native support for it.
-- `bignum`: arbitrary-precision decimal via GMP, with automatic memory management (handles are freed when they go out of scope, get reassigned, or a function returns) — no manual `free` needed.
+- `bignum`: arbitrary-precision decimal via GMP, with automatic memory management (handles are freed when they go out of scope, get reassigned, or a function returns) — no manual `free` needed. `xx`/`xxx`/unary negation all work on it too.
+- `numw` ("number word"): a `num` in every runtime respect, but its own type, that also accepts an English-magnitude-word literal form — `var:numw 'apples' = '1 million';`. Supports negatives and decimals (`'-2.5 billion'`); a bare number with no word is just that number.
 
 ## Requirements
 
@@ -90,6 +91,7 @@ The language design is mine; Claude Code implemented it. To be specific about wh
 - The decision to add `bignum` via GMP, kept separate from `num`
 - Base type keywords (`num`, `str`, `bool`)
 - Automatic scope-based memory management (no manual `free`) — chosen among options Claude presented
+- `numw` and its `'1 million'`-style literal syntax
 
 **Defaulted by Claude** (conventional choices from the first scaffolding commit, never revisited):
 - `fn 'name'(param: type, ...) -> type { ... }` function declaration syntax
