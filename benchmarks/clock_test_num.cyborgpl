@@ -1,0 +1,15 @@
+START
+
+clock:num 'start';
+
+var:num 'i' = (0);
+var:num 'acc' = (0);
+while (ref:var:num 'i') < (300000) {
+    ref:var:num 'acc' = (ref:var:num 'acc') + (1);
+    ref:var:num 'i' = (ref:var:num 'i') + (1);
+}
+
+clock:num 'end';
+print*"elapsed = " (ref:var:num 'end') - (ref:var:num 'start') " seconds"*;
+
+END

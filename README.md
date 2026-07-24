@@ -78,6 +78,10 @@ END
 
 See [examples/](examples/) for more.
 
+## Benchmarks
+
+[benchmarks/](benchmarks/) has a small, honestly-caveated timing comparison against Python, Rust, and Java on one tiny loop — not a rigorous study, just curiosity about where a brand-new, mostly-unoptimized hobby compiler currently stands next to mature ones.
+
 ## Contributing
 
 This is a solo, exploratory project and the language design is still very much in flux — I'm not reviewing external pull requests right now, since core syntax decisions are still being made and would likely conflict with in-progress work. That said, if you have ideas, questions, or spot a bug, **opening an issue is very welcome**.
