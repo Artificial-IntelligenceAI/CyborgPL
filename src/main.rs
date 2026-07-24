@@ -15,7 +15,7 @@ use parser::Parser;
 
 // Used when no source file is given on the command line.
 const DEFAULT_SOURCE: &str = r#"
-    fn 'add'*'a': num, 'b': num* -> num {
+    func 'add'*'a': num, 'b': num* -> num {
         return (ref:var:num 'a') + (ref:var:num 'b');
     }
 

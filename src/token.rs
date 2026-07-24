@@ -10,12 +10,13 @@ pub enum Token {
     Quoted(String),
 
     // Keywords
-    Fn,
     Var,
     /// Starts a variable reference (`ref:var:TYPE 'name'`) or a function
     /// call (`ref:func 'name'*args*`).
     Ref,
-    /// The other thing `ref:` can lead to, alongside `var`: `ref:func 'name'*args*`.
+    /// Both a top-level function definition (`func 'name'*params* -> type
+    /// { ... }`) and the other thing `ref:` can lead to, alongside `var`
+    /// (`ref:func 'name'*args*`) -- same keyword, two different positions.
     Func,
     If,
     Else,
@@ -70,7 +71,6 @@ pub enum Token {
 impl Token {
     pub fn keyword_from_str(s: &str) -> Option<Token> {
         match s {
-            "fn" => Some(Token::Fn),
             "var" => Some(Token::Var),
             "ref" => Some(Token::Ref),
             "func" => Some(Token::Func),

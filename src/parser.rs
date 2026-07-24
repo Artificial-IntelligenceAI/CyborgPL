@@ -20,7 +20,7 @@ impl Parser {
 
         while !self.check(&Token::Eof) {
             match self.peek() {
-                Token::Fn => functions.push(self.parse_function()?),
+                Token::Func => functions.push(self.parse_function()?),
                 Token::Start => {
                     if entry.is_some() {
                         return Err(format!(
@@ -32,7 +32,7 @@ impl Parser {
                 }
                 other => {
                     return Err(format!(
-                        "line {}: expected 'fn' or 'START', found {:?}",
+                        "line {}: expected 'func' or 'START', found {:?}",
                         self.tokens[self.pos].line, other
                     ));
                 }
@@ -55,7 +55,7 @@ impl Parser {
     }
 
     fn parse_function(&mut self) -> PResult<Function> {
-        self.expect(Token::Fn)?;
+        self.expect(Token::Func)?;
         let name = self.expect_quoted_ident()?;
         self.expect(Token::Star)?;
 

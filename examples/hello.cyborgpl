@@ -1,4 +1,4 @@
-fn 'add'*'a': num, 'b': num* -> num {
+func 'add'*'a': num, 'b': num* -> num {
     return (ref:var:num 'a') + (ref:var:num 'b');
 }
 
