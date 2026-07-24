@@ -26,27 +26,55 @@ variants per language where practical:
 
 Source files are all in this directory, exactly as run.
 
+`*Warm.java` variants also exist for `long`/`BigInteger`: they run the same
+loop 20 times inside one JVM process, so the JIT compiler gets a real chance
+to optimize the hot loop, addressing the "Java measured cold" caveat below.
+Runs 0–2 or so are still cold (interpreted/being JIT-compiled); later runs
+show the actual steady-state, warmed performance.
+
+**A methodology pitfall hit and fixed while building these**: the first
+version of `ClockTestLongWarm` had no `volatile` sink for the accumulator —
+once warmed, its JIT-compiled loop dropped to ~0 seconds, because a
+sufficiently optimizing JIT can prove `for (i=0..300000) acc+=1` reduces to
+the closed-form `acc=300000` and eliminate the loop entirely. This is the
+exact same issue `std::hint::black_box` exists to prevent in Rust — an
+optimizer smart enough to prove a loop's result is a compile-time constant
+is under no obligation to actually run it. Fixed by writing to a `static
+volatile` field every iteration, which the JIT can't prove is safe to
+eliminate (another thread could theoretically observe it).
+
 ## Results
 
 | Language | Accumulator | Elapsed (seconds, a few runs) |
 |---|---|---|
-| CyborgPL | `bignum` (GMP) | 0.034, 0.040, 0.047 |
-| CyborgPL | `num` (native float) | 0.0002, 0.0002, 0.0003 |
-| Rust | `u64` (native int) | 0.00007, 0.00011, 0.00012 |
-| Java | `BigInteger` | 0.00534, 0.00534, 0.00540 |
-| Java | `long` (native int) | 0.00051, 0.00058, 0.00068 |
-| Python | `int` (arbitrary precision, small-int fast path) | 0.0091, 0.0128, 0.0130 |
+| CyborgPL | `bignum` (GMP) | 0.034, 0.040, 0.047, 0.054 |
+| CyborgPL | `num` (native float) | 0.0002, 0.0002, 0.0003, 0.0003 |
+| Rust | `u64` (native int) | 0.00007, 0.00011, 0.00012, 0.00033 |
+| Java | `BigInteger`, cold | 0.00534, 0.00534, 0.00540, 0.00516 |
+| Java | `BigInteger`, warmed (steady-state, runs 10-19) | ~0.0017–0.0036 (noisy — likely GC pressure, see below) |
+| Java | `long`, cold | 0.00051, 0.00058, 0.00068 |
+| Java | `long`, warmed (steady-state, runs 10-19) | ~0.0000651, essentially flat |
+| Python | `int` (arbitrary precision, small-int fast path) | 0.0091, 0.0128, 0.0130, 0.0138 |
+
+Warmed `long` is the standout result here: once the JIT compiles it,
+CyborgPL's fully-native-compiled `num` loop (~0.0002-0.0003s) is actually
+*slower* than JIT-warmed Java's `long` loop (~0.000065s) — a real
+illustration of what a mature, adaptive JIT can do once it's had the chance
+to specialize hot code, versus CyborgPL's single fixed compile with one
+optimization pass. Warmed `BigInteger` doesn't show the same clean
+convergence — it stays noisy (roughly 0.0015-0.0036s, no flat steady
+state like `long` reached), plausibly because every `.add()` call
+allocates a new immutable `BigInteger` object, so warmup doesn't remove
+garbage-collection pressure the way it removes interpretation/compilation
+overhead for a simple numeric loop.
 
 ## Honest caveats
 
-- **This is one run of a tiny, unrepresentative loop, not a real benchmark.**
-  No warmup iterations, no statistical repeats, no attempt to control for
-  system noise. Treat every number as "roughly this order of magnitude,"
-  not precise.
-- **Java is measured cold — no JIT warmup.** The JVM's real performance
-  advantage comes from its JIT compiler optimizing hot code after it's run
-  many times; a single 300,000-iteration run barely gives it the chance.
-  Java's numbers here likely understate what it can actually do.
+- **This is a handful of runs of a tiny, unrepresentative loop, not a real
+  benchmark.** No statistical repeats beyond the 20-run warm variants, no
+  attempt to control for system noise (other processes, thermal
+  throttling, etc.). Treat every number as "roughly this order of
+  magnitude," not precise.
 - **CyborgPL is a brand-new hobby compiler** with exactly one optimization
   pass (`mem2reg`) — no inlining, no loop optimizations, no constant
   folding across statements. Rust, the JVM, and CPython are all mature,
@@ -79,4 +107,9 @@ rustc -O benchmarks/clock_test.rs -o /tmp/clock_test_rust && /tmp/clock_test_rus
 javac benchmarks/ClockTestBigInteger.java benchmarks/ClockTestLong.java -d /tmp
 java -cp /tmp ClockTestBigInteger
 java -cp /tmp ClockTestLong
+
+# Java, warmed (20 runs in one JVM, look at the later runs for steady-state)
+javac benchmarks/ClockTestBigIntegerWarm.java benchmarks/ClockTestLongWarm.java -d /tmp
+java -cp /tmp ClockTestBigIntegerWarm
+java -cp /tmp ClockTestLongWarm
 ```
