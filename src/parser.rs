@@ -57,10 +57,10 @@ impl Parser {
     fn parse_function(&mut self) -> PResult<Function> {
         self.expect(Token::Fn)?;
         let name = self.expect_quoted_ident()?;
-        self.expect(Token::LParen)?;
+        self.expect(Token::Star)?;
 
         let mut params = Vec::new();
-        if !self.check(&Token::RParen) {
+        if !self.check(&Token::Star) {
             loop {
                 let pname = self.expect_quoted_ident()?;
                 self.expect(Token::Colon)?;
@@ -73,7 +73,7 @@ impl Parser {
                 }
             }
         }
-        self.expect(Token::RParen)?;
+        self.expect(Token::Star)?;
 
         let return_type = if self.check(&Token::Arrow) {
             self.advance();
@@ -195,6 +195,17 @@ impl Parser {
                 self.expect(Token::Semicolon)?;
                 Ok(Stmt::VarDecl(name, ty, value))
             }
+            // `ref:func 'name'*args*;` (calling a function as a statement,
+            // e.g. one that just prints and returns nothing) versus
+            // `ref:var:TYPE ...` (a reassignment or a bare variable
+            // reference as a statement) -- told apart by looking two
+            // tokens past `ref` (past the `:`), same technique as
+            // parse_primary's own Ref handling.
+            Token::Ref if self.tokens.get(self.pos + 2).map(|t| &t.token) == Some(&Token::Func) => {
+                let expr = self.parse_func_call()?;
+                self.expect(Token::Semicolon)?;
+                Ok(Stmt::ExprStmt(expr))
+            }
             Token::Ref => {
                 // Either a reassignment (`ref:var:TYPE 'name' = expr;`) or a
                 // bare variable reference used as a statement on its own.
@@ -240,12 +251,15 @@ impl Parser {
                         // A computed segment is recognized just by seeing
                         // the start of an expression -- every value now
                         // begins with its own required '(' wrap, or a
-                        // function call begins with a quoted name, either
-                        // of which is already enough to tell it apart from
-                        // a literal Str segment. No separate print-specific
+                        // function call begins with `ref:func`, either of
+                        // which is already enough to tell it apart from a
+                        // literal Str segment. No separate print-specific
                         // marker needed anymore now that the general value
-                        // grammar itself always starts unambiguously.
-                        Token::LParen | Token::Quoted(_) => {
+                        // grammar itself always starts unambiguously. A call
+                        // fully consumes its own `*args*` before this loop
+                        // checks for the closing `*` again, so there's no
+                        // ambiguity between the two uses of `*`.
+                        Token::LParen | Token::Ref => {
                             let value = self.parse_expr()?;
                             segments.push(PrintSegment::Expr(value));
                         }
@@ -426,32 +440,14 @@ impl Parser {
                 self.expect(Token::RParen)?;
                 Ok(expr)
             }
-            // A quoted name is only ever a function name now, and only valid
-            // when immediately called with '(' -- plain 'name' alone isn't
-            // a variable reference anymore (that's ref:var:TYPE 'name').
-            Token::Quoted(name) => {
-                let line = self.tokens[self.pos].line;
-                self.advance();
-                if !self.check(&Token::LParen) {
-                    return Err(format!(
-                        "line {line}: '{name}' alone isn't a variable reference anymore -- \
-                         use ref:var:TYPE '{name}', or '{name}(' to call it as a function"
-                    ));
-                }
-                self.advance();
-                let mut args = Vec::new();
-                if !self.check(&Token::RParen) {
-                    loop {
-                        args.push(self.parse_expr()?);
-                        if self.check(&Token::Comma) {
-                            self.advance();
-                        } else {
-                            break;
-                        }
-                    }
-                }
-                self.expect(Token::RParen)?;
-                Ok(Expr::Call(name, args))
+            // `ref:func 'name'*args*` is the only way to call a function
+            // now. `ref:var:TYPE 'name'` reaching here (rather than through
+            // the required '(' above) means a value wasn't wrapped -- same
+            // error as any other bare atom. Looking two tokens past `ref`
+            // (past the `:`) tells them apart without consuming anything
+            // on the "not a call" path.
+            Token::Ref if self.tokens.get(self.pos + 2).map(|t| &t.token) == Some(&Token::Func) => {
+                self.parse_func_call()
             }
             other => Err(format!(
                 "line {}: every value must be wrapped in parens -- e.g. (5), (ref:var:num 'x') -- found {:?}",
@@ -508,6 +504,31 @@ impl Parser {
         let ty = self.parse_optional_precision(ty)?;
         let name = self.expect_quoted_ident()?;
         Ok((name, ty))
+    }
+
+    /// Parses `ref:func 'name'*arg, arg, ...*` -- the only way to call a
+    /// function now. Exempt from the "every value needs its own `( )`"
+    /// rule, like every function call: it already has its own delimiters
+    /// (`*...*`, mirroring how `print*...*` brackets its own segments).
+    fn parse_func_call(&mut self) -> PResult<Expr> {
+        self.expect(Token::Ref)?;
+        self.expect(Token::Colon)?;
+        self.expect(Token::Func)?;
+        let name = self.expect_quoted_ident()?;
+        self.expect(Token::Star)?;
+        let mut args = Vec::new();
+        if !self.check(&Token::Star) {
+            loop {
+                args.push(self.parse_expr()?);
+                if self.check(&Token::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+        }
+        self.expect(Token::Star)?;
+        Ok(Expr::Call(name, args))
     }
 
     // --- token stream helpers ---

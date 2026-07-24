@@ -15,7 +15,7 @@ use parser::Parser;
 
 // Used when no source file is given on the command line.
 const DEFAULT_SOURCE: &str = r#"
-    fn 'add'('a': num, 'b': num) -> num {
+    fn 'add'*'a': num, 'b': num* -> num {
         return (ref:var:num 'a') + (ref:var:num 'b');
     }
 
@@ -23,7 +23,7 @@ const DEFAULT_SOURCE: &str = r#"
         var:num 'first' = (5);
         var:num 'second' = (2.5);
         if (ref:var:num 'first') < (ref:var:num 'second') {
-            print*'add'((ref:var:num 'first'), (ref:var:num 'second'))*;
+            print*ref:func 'add'*(ref:var:num 'first'), (ref:var:num 'second')**;
         } else {
             print*(0)*;
         }

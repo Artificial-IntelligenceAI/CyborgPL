@@ -12,8 +12,11 @@ pub enum Token {
     // Keywords
     Fn,
     Var,
-    /// Starts a variable reference: `ref:var:TYPE 'name'`.
+    /// Starts a variable reference (`ref:var:TYPE 'name'`) or a function
+    /// call (`ref:func 'name'*args*`).
     Ref,
+    /// The other thing `ref:` can lead to, alongside `var`: `ref:func 'name'*args*`.
+    Func,
     If,
     Else,
     While,
@@ -70,6 +73,7 @@ impl Token {
             "fn" => Some(Token::Fn),
             "var" => Some(Token::Var),
             "ref" => Some(Token::Ref),
+            "func" => Some(Token::Func),
             "if" => Some(Token::If),
             "else" => Some(Token::Else),
             "while" => Some(Token::While),

@@ -8,9 +8,9 @@ CyborgPL is a hobby programming language that compiles to native machine code vi
 
 - A full pipeline: lexer → parser → AST → LLVM codegen → native object file → linked binary (via [inkwell](https://github.com/TheDan64/inkwell)).
 - `var:type 'name' = value;` variable declarations, with `ref:var:type 'name'` for every read/write reference.
-- `START ... END` as the program's entry point; `fn 'name'(...) -> type { ... }` for function definitions.
+- `START ... END` as the program's entry point; `fn 'name'*'param': type, ...* -> type { ... }` for function definitions, called via `ref:func 'name'*arg, arg, ...*` (mirroring `print*...*`'s own bracketing of a list of things).
 - `if`/`else`, `while`, and real lexical block scoping (a variable declared inside a block is gone once the block ends).
-- Every value (a literal or a `ref:var:type 'name'` reference) must be individually wrapped in `( )` to be used in any expression — `(a) + (b)`, not `a + b`. A reassignment's target is the one exception (`ref:var:type 'name' = ...` stays bare, since it's a place, not a value); function calls don't need an extra wrap around the whole call either, though each argument still needs its own.
+- Every value (a literal or a `ref:var:type 'name'` reference) must be individually wrapped in `( )` to be used in any expression — `(a) + (b)`, not `a + b`. A reassignment's target is the one exception (`ref:var:type 'name' = ...` stays bare, since it's a place, not a value); a function call doesn't need an extra wrap around the whole call either, though each argument still needs its own.
 - `print*"literal text" (expr) "more text"*;` — literal and computed segments mixed freely; a computed segment needs no separate marker of its own since every value already starts with `(` (or a function-call name), which is enough to tell it apart from literal text.
 - Math operators: `x` (multiply), `xx` (power), `xxx` (tetration), plus the usual comparisons and boolean logic.
 - Variables can share a name across different types, disambiguated by the type stated at each reference site.
@@ -43,7 +43,7 @@ cargo run
 ## Examples
 
 ```
-fn 'add'('a': num, 'b': num) -> num {
+fn 'add'*'a': num, 'b': num* -> num {
     return (ref:var:num 'a') + (ref:var:num 'b');
 }
 
@@ -93,9 +93,10 @@ The language design is mine; Claude Code implemented it. To be specific about wh
 - Base type keywords (`num`, `str`, `bool`)
 - Automatic scope-based memory management (no manual `free`) — chosen among options Claude presented
 - `numw` and its `'1 million'`-style literal syntax
+- `fn 'name'*param, ...*` — replacing the original defaulted `( )` parameter list with `*...*`, matching `print`'s own bracketing style
+- `ref:func 'name'*arg, ...*` — replacing the original defaulted bare `'name'(...)` call syntax, mirroring `ref:var:TYPE 'name'`'s shape for reading a variable
 
 **Defaulted by Claude** (conventional choices from the first scaffolding commit, never revisited):
-- `fn 'name'(param: type, ...) -> type { ... }` function declaration syntax
 - `if`/`else`/`while` keywords and brace-delimited blocks
 - Comparison/logical operators' exact spelling
 
