@@ -10,6 +10,7 @@ CyborgPL is a hobby programming language that compiles to native machine code vi
 - `var:type 'name' = value;` variable declarations, with `ref:var:type 'name'` for every read/write reference.
 - `START ... END` as the program's entry point; `fn 'name'(...) -> type { ... }` for function definitions.
 - `if`/`else`, `while`, and real lexical block scoping (a variable declared inside a block is gone once the block ends).
+- Every value (a literal or a `ref:var:type 'name'` reference) must be individually wrapped in `( )` to be used in any expression — `(a) + (b)`, not `a + b`. A reassignment's target is the one exception (`ref:var:type 'name' = ...` stays bare, since it's a place, not a value); function calls don't need an extra wrap around the whole call either, though each argument still needs its own.
 - `print*"literal text" (expr) "more text"*;` — literal and computed segments mixed freely.
 - Math operators: `x` (multiply), `xx` (power), `xxx` (tetration), plus the usual comparisons and boolean logic.
 - Variables can share a name across different types, disambiguated by the type stated at each reference site.
@@ -43,16 +44,16 @@ cargo run
 
 ```
 fn 'add'('a': num, 'b': num) -> num {
-    return ref:var:num 'a' + ref:var:num 'b';
+    return (ref:var:num 'a') + (ref:var:num 'b');
 }
 
 START
-    var:num 'first' = 5;
-    var:num 'second' = 2.5;
-    print*"first + second = " (ref:var:num 'first' + ref:var:num 'second')*;
+    var:num 'first' = (5);
+    var:num 'second' = (2.5);
+    print*"first + second = " ((ref:var:num 'first') + (ref:var:num 'second'))*;
 
-    var:bignum 'big' = "3.14159265358979323846264338327950288419716939937510582097494459230781640628620899862803482534211706798214808651328230664709384460955058223172535940812848111745028410270193852110555964462294895493038196";
-    print*"pi to 200 digits: " (ref:var:bignum 'big')*;
+    var:bignum 'big' = ("3.14159265358979323846264338327950288419716939937510582097494459230781640628620899862803482534211706798214808651328230664709384460955058223172535940812848111745028410270193852110555964462294895493038196");
+    print*"pi to 200 digits: " ((ref:var:bignum 'big'))*;
 END
 ```
 
@@ -61,12 +62,12 @@ END
 ```
 START
 
-var:num 'apples🍎' = 42;
-var:str 'weird_str' = "spécial \tvalue\n with \\backslash\\ and a 100% discount";
-var:bool 'is_chaotic?!' = true;
-var:bignum 'huge💥' = "31415926535897932384626433832795028841971693993751";
+var:num 'apples🍎' = (42);
+var:str 'weird_str' = ("spécial \tvalue\n with \\backslash\\ and a 100% discount");
+var:bool 'is_chaotic?!' = (true);
+var:bignum 'huge💥' = ("31415926535897932384626433832795028841971693993751");
 
-print*"Chaos test: \"quoted\", tab:\there, newline-escaped-below" (ref:var:str 'weird_str') "|| 🍎🔥💀 emoji-in-text || num=" (ref:var:num 'apples🍎') " || bool=" (ref:var:bool 'is_chaotic?!') " || bignum=" (ref:var:bignum 'huge💥') " || (num xx 2) x 3 + num xxx 2 = " (ref:var:num 'apples🍎' xx 2 x 3 + ref:var:num 'apples🍎' xxx 2) " || 100% done."*;
+print*"Chaos test: \"quoted\", tab:\there, newline-escaped-below" ((ref:var:str 'weird_str')) "|| 🍎🔥💀 emoji-in-text || num=" ((ref:var:num 'apples🍎')) " || bool=" ((ref:var:bool 'is_chaotic?!')) " || bignum=" ((ref:var:bignum 'huge💥')) " || (num xx 2) x 3 + num xxx 2 = " ((ref:var:num 'apples🍎') xx (2) x (3) + (ref:var:num 'apples🍎') xxx (2)) " || 100% done."*;
 
 END
 ```

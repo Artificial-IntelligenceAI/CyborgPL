@@ -198,18 +198,13 @@ impl Parser {
             Token::Ref => {
                 // Either a reassignment (`ref:var:TYPE 'name' = expr;`) or a
                 // bare variable reference used as a statement on its own.
-                // `ref:var:TYPE 'name'` parses as a plain Expr::Var, and `=`
-                // isn't part of any expression grammar rule, so parse_expr
-                // naturally stops right where we need to check for it --
-                // no backtracking required.
-                let line = self.tokens[self.pos].line;
-                let expr = self.parse_expr()?;
+                // Parsed directly here rather than through the general
+                // expression grammar: the target of an assignment is a
+                // place, not a value, so it's exempt from the "every value
+                // is wrapped in ( )" rule the RHS and everything else now
+                // follows.
+                let (name, ty) = self.parse_ref_var()?;
                 if self.check(&Token::Eq) {
-                    let Expr::Var(name, ty) = expr else {
-                        return Err(format!(
-                            "line {line}: left side of '=' must be a plain ref:var:TYPE 'name'"
-                        ));
-                    };
                     self.advance();
                     let value = match self.try_parse_numw_literal(ty)? {
                         Some(v) => v,
@@ -219,7 +214,7 @@ impl Parser {
                     return Ok(Stmt::Assign(name, ty, value));
                 }
                 self.expect(Token::Semicolon)?;
-                Ok(Stmt::ExprStmt(expr))
+                Ok(Stmt::ExprStmt(Expr::Var(name, ty)))
             }
             Token::Return => {
                 self.advance();
@@ -405,42 +400,25 @@ impl Parser {
         }
     }
 
+    /// Every value (a number/string/bool literal, or a `ref:var:TYPE 'name'`
+    /// reference) must now be individually wrapped in `( )` to be used in
+    /// any expression -- this is the only place that requirement is
+    /// enforced, since it's the only place a bare atom used to be reachable.
+    /// A chain like `(a) + (b) + (c)` still works exactly like before this
+    /// requirement existed: each wrapped atom is just an ordinary operand
+    /// to the (unchanged) precedence-climbing chain above, so multi-term
+    /// expressions combine without needing to re-wrap any intermediate
+    /// result. Function calls (`'name'(...)`) are exempt -- they already
+    /// have their own delimiters and don't need an extra wrap around the
+    /// whole call, though each of their *arguments* is itself a value and
+    /// so still needs its own wrap.
     fn parse_primary(&mut self) -> PResult<Expr> {
         match self.peek().clone() {
-            Token::Num(n) => {
-                self.advance();
-                Ok(Expr::Num(n))
-            }
-            Token::Str(s) => {
-                self.advance();
-                Ok(Expr::Str(s))
-            }
-            Token::True => {
-                self.advance();
-                Ok(Expr::Bool(true))
-            }
-            Token::False => {
-                self.advance();
-                Ok(Expr::Bool(false))
-            }
             Token::LParen => {
                 self.advance();
-                let expr = self.parse_expr()?;
+                let expr = self.parse_wrapped_atom()?;
                 self.expect(Token::RParen)?;
                 Ok(expr)
-            }
-            // `ref:var:TYPE 'name'` is the only way to read a variable's
-            // value now. The type is which variable named 'name' this is --
-            // the same name can be shared by variables of different types.
-            Token::Ref => {
-                self.advance();
-                self.expect(Token::Colon)?;
-                self.expect(Token::Var)?;
-                self.expect(Token::Colon)?;
-                let ty = self.parse_type()?;
-                let ty = self.parse_optional_precision(ty)?;
-                let name = self.expect_quoted_ident()?;
-                Ok(Expr::Var(name, ty))
             }
             // A quoted name is only ever a function name now, and only valid
             // when immediately called with '(' -- plain 'name' alone isn't
@@ -470,10 +448,60 @@ impl Parser {
                 Ok(Expr::Call(name, args))
             }
             other => Err(format!(
-                "line {}: unexpected token {:?}",
+                "line {}: every value must be wrapped in parens -- e.g. (5), (ref:var:num 'x') -- found {:?}",
                 self.tokens[self.pos].line, other
             )),
         }
+    }
+
+    /// Parses exactly one atomic value -- a number/string/bool literal, or
+    /// a `ref:var:TYPE 'name'` reference -- the only things allowed
+    /// directly inside a required `( )` wrapper.
+    fn parse_wrapped_atom(&mut self) -> PResult<Expr> {
+        match self.peek().clone() {
+            Token::Num(n) => {
+                self.advance();
+                Ok(Expr::Num(n))
+            }
+            Token::Str(s) => {
+                self.advance();
+                Ok(Expr::Str(s))
+            }
+            Token::True => {
+                self.advance();
+                Ok(Expr::Bool(true))
+            }
+            Token::False => {
+                self.advance();
+                Ok(Expr::Bool(false))
+            }
+            // `ref:var:TYPE 'name'` is the only way to read a variable's
+            // value now. The type is which variable named 'name' this is --
+            // the same name can be shared by variables of different types.
+            Token::Ref => {
+                let (name, ty) = self.parse_ref_var()?;
+                Ok(Expr::Var(name, ty))
+            }
+            other => Err(format!(
+                "line {}: expected a value (a number, string, true/false, or ref:var:TYPE 'name') inside '(', found {:?}",
+                self.tokens[self.pos].line, other
+            )),
+        }
+    }
+
+    /// Parses `ref:var:TYPE 'name'` directly. Shared by `parse_wrapped_atom`
+    /// (a ref used as a value, gated behind the `( )` requirement above it)
+    /// and `parse_stmt`'s reassignment handling (a ref used as an
+    /// assignment target, which is exempt from that requirement).
+    fn parse_ref_var(&mut self) -> PResult<(String, Type)> {
+        self.expect(Token::Ref)?;
+        self.expect(Token::Colon)?;
+        self.expect(Token::Var)?;
+        self.expect(Token::Colon)?;
+        let ty = self.parse_type()?;
+        let ty = self.parse_optional_precision(ty)?;
+        let name = self.expect_quoted_ident()?;
+        Ok((name, ty))
     }
 
     // --- token stream helpers ---

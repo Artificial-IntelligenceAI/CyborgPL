@@ -1,18 +1,18 @@
 START
 
-var:bignum 'a' = 2;
-var:bignum 'b' = 3;
+var:bignum 'a' = (2);
+var:bignum 'b' = (3);
 
-print*"a < b = " (ref:var:bignum 'a' < ref:var:bignum 'b')*;
-print*"a == a = " (ref:var:bignum 'a' == ref:var:bignum 'a')*;
-print*"a != b = " (ref:var:bignum 'a' != ref:var:bignum 'b')*;
+print*"a < b = " ((ref:var:bignum 'a') < (ref:var:bignum 'b'))*;
+print*"a == a = " ((ref:var:bignum 'a') == (ref:var:bignum 'a'))*;
+print*"a != b = " ((ref:var:bignum 'a') != (ref:var:bignum 'b'))*;
 
-var:bignum 'counter' = 0;
-var:bignum 'limit' = 5;
-var:bignum 'one' = 1;
-while ref:var:bignum 'counter' < ref:var:bignum 'limit' {
-    print*"counter = " (ref:var:bignum 'counter')*;
-    ref:var:bignum 'counter' = ref:var:bignum 'counter' + ref:var:bignum 'one';
+var:bignum 'counter' = (0);
+var:bignum 'limit' = (5);
+var:bignum 'one' = (1);
+while (ref:var:bignum 'counter') < (ref:var:bignum 'limit') {
+    print*"counter = " ((ref:var:bignum 'counter'))*;
+    ref:var:bignum 'counter' = (ref:var:bignum 'counter') + (ref:var:bignum 'one');
 }
 
 END
