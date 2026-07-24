@@ -8,6 +8,7 @@ A running note of things that have come up as likely next steps or known gaps wh
 - Higher hyperoperator levels beyond `xxx` (tetration), if ever wanted.
 - Whether real lexical block scoping (added for automatic bignum/str cleanup) should extend further.
 - `numw`'s magnitude-word vocabulary is currently a fixed list (thousand/million/billion/trillion/quadrillion/quintillion) and only accepts one word after the number — no compound number words (`'one hundred thousand'`) and no expanding the list without a design decision.
+- Reading user input (stdin) into a variable — e.g. a name typed at runtime becoming a `var:str`'s value. No I/O of any kind exists yet (`print` is output-only). `str` getting real runtime memory management (this session, `stch`'s round) removes what used to be a blocking prerequisite, so this is now realistic to build whenever wanted — syntax (a new keyword? `str`-only at first, or `num` too?) is still undecided.
 
 ## Known implementation gaps
 
