@@ -3,6 +3,7 @@ mod codegen;
 mod lexer;
 mod parser;
 mod token;
+mod typecheck;
 
 use std::path::Path;
 use std::process::Command;
@@ -12,6 +13,7 @@ use inkwell::context::Context;
 use codegen::Codegen;
 use lexer::Lexer;
 use parser::Parser;
+use typecheck::TypeChecker;
 
 // Used when no source file is given on the command line.
 const DEFAULT_SOURCE: &str = r#"
@@ -58,6 +60,13 @@ fn main() {
         eprintln!("parse error: {e}");
         std::process::exit(1);
     });
+
+    if let Err(errors) = TypeChecker::check_program(&program) {
+        for e in &errors {
+            eprintln!("type error: {e}");
+        }
+        std::process::exit(1);
+    }
 
     let context = Context::create();
     let mut codegen = Codegen::new(&context, "cyborgpl");

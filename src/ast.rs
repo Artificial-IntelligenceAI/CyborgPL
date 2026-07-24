@@ -27,6 +27,21 @@ pub enum Type {
 pub const DEFAULT_NUM_PRECISION: u32 = 64;
 pub const DEFAULT_BIGNUM_PRECISION: u32 = 256;
 
+/// Renders a type the way it'd actually be written in CyborgPL source,
+/// for error messages -- `{:?}` (`Num(64)`) reads like Rust, not CyborgPL.
+impl std::fmt::Display for Type {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Type::Num(w) => write!(f, "num[precision:{w}]"),
+            Type::NumW(w) => write!(f, "numw[precision:{w}]"),
+            Type::Bool => write!(f, "bool"),
+            Type::Str => write!(f, "str"),
+            Type::BigNum(p) => write!(f, "bignum[precision:{p}]"),
+            Type::Void => write!(f, "void"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BinOp {
     Add,
@@ -49,6 +64,31 @@ pub enum BinOp {
     Concat,
 }
 
+/// Renders an operator using its actual CyborgPL spelling, for error
+/// messages -- `{:?}` (`Mul`, `Ne`) doesn't match anything a user wrote.
+impl std::fmt::Display for BinOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            BinOp::Add => "+",
+            BinOp::Sub => "-",
+            BinOp::Mul => "x",
+            BinOp::Div => "/",
+            BinOp::Pow => "xx",
+            BinOp::Tetration => "xxx",
+            BinOp::Eq => "==",
+            BinOp::Ne => "not=",
+            BinOp::Lt => "<",
+            BinOp::Gt => ">",
+            BinOp::Le => "<=",
+            BinOp::Ge => ">=",
+            BinOp::And => "&&",
+            BinOp::Or => "||",
+            BinOp::Concat => "stch",
+        };
+        write!(f, "{s}")
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum UnOp {
     Neg,
@@ -56,6 +96,17 @@ pub enum UnOp {
     /// Postfix `!`: factorial. Unlike `Neg`/`Not`, this attaches after its
     /// operand rather than before it (see `parse_postfix`).
     Factorial,
+}
+
+impl std::fmt::Display for UnOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            UnOp::Neg => "-",
+            UnOp::Not => "not",
+            UnOp::Factorial => "!",
+        };
+        write!(f, "{s}")
+    }
 }
 
 #[derive(Debug, Clone)]

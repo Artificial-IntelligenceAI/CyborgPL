@@ -12,6 +12,7 @@ Backend/implementation choices — how codegen works internally, which crate to 
 
 - `src/lexer.rs`, `src/token.rs` — tokenizing `.cyborgpl` source.
 - `src/parser.rs`, `src/ast.rs` — recursive-descent parser and the AST it builds.
+- `src/typecheck.rs` — a static type-checking pass run between parsing and codegen. Deliberately additive only: it mirrors codegen's own coercion rules exactly rather than adding new restrictions, so it should reject nothing that currently works, only turn what already didn't work into a clear error instead of a Rust/LLVM-level panic. If codegen's coercion rules ever change, this file needs the matching update or the two will drift out of sync.
 - `src/codegen.rs` — the biggest file by far; walks the AST and emits LLVM IR via [inkwell](https://github.com/TheDan64/inkwell). Also owns block-scoping and `bignum`'s automatic memory management.
 - `src/main.rs` — CLI entry point; compiles a `.cyborgpl` file (or a built-in demo) to an object file, links it with `cc`, then **runs the result as a child process**. If you're ever measuring the compiled program's memory/CPU behavior, measure that child process (`/tmp/cyborgpl_out`), not the `CyborgPL` binary itself — they're different processes and conflating them gives meaningless numbers.
 - `runtime/fp128/quadmath.c` — a from-scratch software implementation of IEEE-754 quad precision (128-bit floats), since Apple's toolchain has no native 128-bit float type. `runtime/fp128/test_quadmath.c` is its standalone correctness harness (run it directly if you ever touch `quadmath.c`).

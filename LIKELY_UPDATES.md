@@ -4,7 +4,6 @@ A running note of things that have come up as likely next steps or known gaps wh
 
 ## Language design (not yet decided)
 
-- Enforcing `ref:var:TYPE`'s stated type against the actual declaration — right now it's informational only ("clarity, for now"), since no real type checker exists yet.
 - Higher hyperoperator levels beyond `xxx` (tetration), if ever wanted.
 - Whether real lexical block scoping (added for automatic bignum/str cleanup) should extend further.
 - `numw`'s magnitude-word vocabulary is currently a fixed list (thousand/million/billion/trillion/quadrillion/quintillion) and only accepts one word after the number — no compound number words (`'one hundred thousand'`) and no expanding the list without a design decision.
@@ -15,10 +14,10 @@ A running note of things that have come up as likely next steps or known gaps wh
 - `str` now has runtime construction via `stch` and real memory management (every `str` in a variable is its own `strdup`'d copy, freed at scope exit/reassignment/return, mirroring `bignum`). One accepted inefficiency: a value stored somewhere always gets its own fresh copy even when the source was already an unshared temporary (a `stch` result, a str-returning call) — a redundant extra copy in that case, same simplification already accepted for `bignum`.
 - Intermediate bignum binary-op results always compute at the default precision (256 bits) regardless of operand precision, unlike `num`'s "widen to the larger operand" behavior.
 - No LLVM optimization passes run on generated code (`mem2reg`, inlining, etc.) — deliberately deprioritized until the language's basics are finished.
+- The new type checker (`src/typecheck.rs`) only checks *shape* compatibility, not value validity — e.g. `var:bignum 'x' = (ref:var:str 'y');` type-checks fine (`str` is a valid bignum source, for numeric-literal text like `"3.14"`), but if `'y'` holds actual non-numeric text, that's still only caught at runtime (or not caught at all -- `bignum_set_str` on garbage input is undefined). Deliberately out of scope for a checker that mirrors codegen's existing coercion rules rather than adding new restrictions.
 
 ## Bigger, not-yet-started ideas
 
-- A real type checker — would also unlock actually enforcing `ref:var:TYPE`.
 - True arbitrary precision beyond what GMP's `mpf_t` offers, or a fixed-width 256-bit float type — discussed as a much larger undertaking, unstarted.
 - Persistent storage (writing to / reading from a file) — right now `input:`/`print` cover stdin/stdout only; nothing a program does outlives the process. Would need its own syntax (maybe a `write:`/`read:file` pair, parallel to `input:`) and its own design conversation.
 

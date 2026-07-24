@@ -19,6 +19,7 @@ CyborgPL is a hobby programming language that compiles to native machine code vi
 - `numw` ("number word"): a `num` in every runtime respect (including `[precision:16/32/64/128]`), but its own type, that also accepts an English-magnitude-word literal form — `var:numw 'apples' = '1 million';`. Supports negatives and decimals (`'-2.5 billion'`); a bare number with no word is just that number.
 - `stch` ("stitch"): text concatenation — `("count is ") stch (42)` — auto-converting a non-`str` operand to the same display text `print` would give it. Always produces a fresh, independently-owned `str`, usable in a loop-accumulated string or returned from a function, with the same kind of automatic memory management `bignum` already has (every `str` in a variable is its own owned copy, freed at scope exit/reassignment/return — no manual `free` needed).
 - `input:type 'name';` — reads a line from stdin into a new variable, for `str` (the raw line) or `num` (parsed as a number; invalid/non-numeric input is a fatal runtime error with a clear message, not a silent default). No built-in prompt — `print` your own prompt text first.
+- A static type-checking pass runs between parsing and codegen, catching type mistakes (a wrong type stated at `ref:var:TYPE`, mismatched operator operands, wrong function argument types/count, a non-`bool` `if`/`while` condition, a returned value that doesn't match the declared return type) with clear, readable errors — instead of a Rust-level panic or a confusing generic message. It doesn't change what's *allowed*: every coercion codegen already does (num/numw mixing at any precision, num/numw promoting into bignum, etc.) still works exactly the same; this only adds clearer errors for what already didn't work.
 
 ## Requirements
 
@@ -101,6 +102,7 @@ The language design is mine; Claude Code implemented it. To be specific about wh
 - Postfix `!` for factorial, reusing the character freed up by the `not`/`not=` rename, on `num`/`numw`/`bignum`
 - `stch` for text concatenation — a real word-operator, kept separate from `+` (which stays num-only), auto-converting non-`str` operands
 - `input:type 'name';` for reading stdin — a dedicated declaration statement rather than treating `input` as a value; crashing on invalid `num` input rather than silently defaulting to 0
+- The decision to add a real type checker, and to keep it purely additive — every existing auto-coercion still works exactly as before, it only replaces confusing errors with clear ones, rather than becoming stricter
 
 **Defaulted by Claude** (conventional choices from the first scaffolding commit, never revisited):
 - `if`/`else`/`while` keywords and brace-delimited blocks
