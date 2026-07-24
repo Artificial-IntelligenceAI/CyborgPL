@@ -1,0 +1,31 @@
+func 'half16'*'x': num [precision:16]* -> num [precision:16] {
+    return (ref:var:num[precision:16] 'x') / (2);
+}
+
+func 'bignum_add'*'a': bignum, 'b': bignum* -> bignum {
+    return (ref:var:bignum 'a') + (ref:var:bignum 'b');
+}
+
+func 'fact'*'n': bignum* -> bignum {
+    var:bignum 'zero' = (0);
+    var:bignum 'one' = (1);
+    if (ref:var:bignum 'n') <= (ref:var:bignum 'zero') {
+        return (1);
+    } else {
+        return (ref:var:bignum 'n') x ref:func 'fact'*(ref:var:bignum 'n') - (ref:var:bignum 'one')*;
+    }
+}
+
+START
+
+var:num 'h' = (10) [precision:16];
+print*"half16(10) = " ref:func 'half16'*(ref:var:num[precision:16] 'h')**;
+
+var:bignum 'a' = (2);
+var:bignum 'b' = (3);
+print*"bignum_add(2, 3) = " ref:func 'bignum_add'*(ref:var:bignum 'a'), (ref:var:bignum 'b')**;
+
+var:bignum 'twenty' = (20);
+print*"20! = " ref:func 'fact'*(ref:var:bignum 'twenty')**;
+
+END

@@ -57,6 +57,18 @@ pub struct Codegen<'ctx> {
     module: Module<'ctx>,
     builder: Builder<'ctx>,
     functions: HashMap<String, FunctionValue<'ctx>>,
+    /// Each function's declared parameter types (in order) and return type
+    /// -- used at every call site to coerce arguments to what the callee
+    /// actually expects, and to know whether the result needs bignum
+    /// lifetime tracking. Populated in `declare_function`, alongside
+    /// `functions`, before any function body is compiled.
+    function_sigs: HashMap<String, (Vec<Type>, Type)>,
+    /// The return type of whichever function is currently being compiled
+    /// (`Type::Void` for the entry block, which has no return type of its
+    /// own). `Stmt::Return` coerces its value against this before handing
+    /// it back, the same way a variable's declared type coerces whatever
+    /// is stored into it.
+    current_return_type: Type,
     /// Keyed by (name, type) rather than just name, so a name can be shared
     /// by variables of different types -- ref:var:TYPE 'name' picks between
     /// them by type at each reference site.
@@ -187,6 +199,8 @@ impl<'ctx> Codegen<'ctx> {
             module,
             builder,
             functions: HashMap::new(),
+            function_sigs: HashMap::new(),
+            current_return_type: Type::Void,
             variables: HashMap::new(),
             scopes: Vec::new(),
             bignum_temps: Vec::new(),
@@ -462,6 +476,8 @@ impl<'ctx> Codegen<'ctx> {
 
         let function = self.module.add_function(&f.name, fn_type, None);
         self.functions.insert(f.name.clone(), function);
+        let param_sig_types: Vec<Type> = f.params.iter().map(|p| p.ty).collect();
+        self.function_sigs.insert(f.name.clone(), (param_sig_types, f.return_type));
     }
 
     /// Compiles the `START...END` block into the actual `main` the C runtime
@@ -473,6 +489,7 @@ impl<'ctx> Codegen<'ctx> {
         self.builder.position_at_end(block);
         self.variables.clear();
         self.scopes.clear();
+        self.current_return_type = Type::Void;
 
         self.compile_block(entry)?;
 
@@ -490,13 +507,22 @@ impl<'ctx> Codegen<'ctx> {
         self.builder.position_at_end(entry);
         self.variables.clear();
         self.scopes.clear();
+        self.current_return_type = f.return_type;
+        // Wraps params + the whole body in one scope, so a bignum
+        // parameter gets freed exactly like any other bignum local --
+        // whether via an explicit `return` (whose own scope-walk already
+        // reaches every open frame, params' included) or by falling off
+        // the end below.
+        self.scopes.push(Vec::new());
 
         for (i, param) in f.params.iter().enumerate() {
             let value = function.get_nth_param(i as u32).unwrap();
             let ty = self.basic_type(param.ty);
             let alloca = self.builder.build_alloca(ty, &param.name).unwrap();
             self.builder.build_store(alloca, value).unwrap();
-            self.variables.insert((param.name.clone(), param.ty), (alloca, ty));
+            let key = (param.name.clone(), param.ty);
+            self.declare_scoped(key.clone());
+            self.variables.insert(key, (alloca, ty));
         }
 
         self.compile_block(&f.body)?;
@@ -506,7 +532,16 @@ impl<'ctx> Codegen<'ctx> {
         // patch one in (a real type checker would flag this as missing
         // a return on some path instead of silently defaulting).
         let current_block = self.builder.get_insert_block().unwrap();
-        if current_block.get_terminator().is_none() {
+        let terminated = current_block.get_terminator().is_some();
+        // Pop the param scope *before* building any default-return
+        // terminator below: if not terminated, this is where bignum
+        // params actually get freed, and it has to happen before the
+        // terminator since nothing can follow one in the same block. If
+        // already terminated, an explicit `return` already walked this
+        // same scope and freed it -- this call only does the (silent)
+        // variable-table bookkeeping, no duplicate frees.
+        self.pop_scope(!terminated);
+        if !terminated {
             match f.return_type {
                 Type::Void => {
                     self.builder.build_return(None).unwrap();
@@ -593,34 +628,25 @@ impl<'ctx> Codegen<'ctx> {
                 self.builder.build_store(ptr, value).unwrap();
             }
             Stmt::Return(expr) => {
-                // A bare `return ref:var:bignum 'x';` hands out 'x''s own
-                // handle (reading a variable doesn't copy it -- only
-                // assignment does), so that one specific variable must
-                // survive the free pass below or the caller gets a
-                // dangling pointer. Anything else (a computed bignum
-                // expression, a different type entirely) doesn't alias any
-                // local, since bignum binary ops always allocate a fresh
-                // destination handle.
-                let skip_key = match expr {
-                    Some(Expr::Var(n, ty @ Type::BigNum(_))) => Some((n.clone(), *ty)),
-                    _ => None,
-                };
                 let value = match expr {
                     Some(e) => Some(self.compile_expr(e)?),
                     None => None,
                 };
-                // If the returned value is itself a fresh bignum temporary
-                // (`return a + b;`), it must survive the temp-draining pass
-                // below -- it's the function's actual return value now, not
-                // a discarded intermediate. Compared against the exact
-                // value `compile_expr` produced for it, not a freshly
-                // re-extracted pointer (see the `bignum_temps` field docs).
+                // Coerced to the function's declared return type *before*
+                // anything below gets freed. For bignum this always makes
+                // an independent copy (same as storing into any variable
+                // or argument already does) -- which means whatever the
+                // source was (a named variable, a computed bignum_temps
+                // intermediate) is safe to free unconditionally afterward,
+                // since the coerced copy never aliases it. This also
+                // closes the old Expr::Call bignum leak: a caller now
+                // always receives its own fresh handle, never one it has
+                // to guess whether it owns.
+                let coerced = value.map(|v| self.coerce_to_type(v, self.current_return_type));
+
                 let temps: Vec<(PointerValue<'ctx>, BasicValueEnum<'ctx>)> = self.bignum_temps.drain(..).collect();
-                for (ptr, produced) in temps {
-                    let is_returned = matches!(value, Some(v) if v == produced);
-                    if !is_returned {
-                        self.free_bignum_ptr(ptr);
-                    }
+                for (ptr, _) in temps {
+                    self.free_bignum_ptr(ptr);
                 }
                 // A `return` exits every block it's nested in at once, so
                 // every currently-open scope must be freed here -- not
@@ -635,13 +661,13 @@ impl<'ctx> Codegen<'ctx> {
                     .rev()
                     .flat_map(|frame| frame.iter().rev())
                     .map(ScopeEntry::key)
-                    .filter(|key| matches!(key.1, Type::BigNum(_)) && Some(*key) != skip_key.as_ref())
+                    .filter(|key| matches!(key.1, Type::BigNum(_)))
                     .cloned()
                     .collect();
                 for key in &to_free {
                     self.free_bignum_var(key);
                 }
-                match value {
+                match coerced {
                     Some(value) => {
                         self.builder.build_return(Some(&value)).unwrap();
                     }
@@ -693,15 +719,7 @@ impl<'ctx> Codegen<'ctx> {
                 // arm assumes every call is used in value position and
                 // panics otherwise. A bare statement never needs the value.
                 if let Expr::Call(name, args) = expr {
-                    let function = *self
-                        .functions
-                        .get(name)
-                        .ok_or_else(|| format!("undefined function '{name}'"))?;
-                    let arg_values: Vec<BasicMetadataValueEnum> = args
-                        .iter()
-                        .map(|a| self.compile_expr(a).map(Into::into))
-                        .collect::<Result<_, _>>()?;
-                    self.builder.build_call(function, &arg_values, "call").unwrap();
+                    self.compile_call(name, args)?;
                 } else {
                     self.compile_expr(expr)?;
                 }
@@ -956,21 +974,44 @@ impl<'ctx> Codegen<'ctx> {
                     (l, r) => panic!("binary {op:?} used with mismatched operand types {l:?} / {r:?}"),
                 }
             }
-            Expr::Call(name, args) => {
-                let function = *self
-                    .functions
-                    .get(name)
-                    .ok_or_else(|| format!("undefined function '{name}'"))?;
-                let arg_values: Vec<BasicMetadataValueEnum> = args
-                    .iter()
-                    .map(|a| self.compile_expr(a).map(Into::into))
-                    .collect::<Result<_, _>>()?;
-                let call = self.builder.build_call(function, &arg_values, "call").unwrap();
-                call.try_as_basic_value()
-                    .basic()
-                    .expect("function used in expression position must return a value")
-            }
+            Expr::Call(name, args) => self
+                .compile_call(name, args)?
+                .expect("function used in expression position must return a value"),
         })
+    }
+
+    /// Compiles a call to `name`, coercing each argument to the callee's
+    /// declared parameter type first (the same way storing a value into a
+    /// variable coerces it to that variable's declared type) -- without
+    /// this, passing e.g. a bare literal to a `[precision:16]` parameter
+    /// would be an LLVM type mismatch. If the callee returns a bignum, the
+    /// result is registered in `bignum_temps` like any other freshly
+    /// produced bignum value: the callee always hands off a value nothing
+    /// else has a claim to, whether the result is actually used (an
+    /// `Expr::Call` in value position) or discarded (a bare call
+    /// statement) -- either way it must eventually be freed.
+    fn compile_call(&mut self, name: &str, args: &[Expr]) -> Result<Option<BasicValueEnum<'ctx>>, String> {
+        let function = *self.functions.get(name).ok_or_else(|| format!("undefined function '{name}'"))?;
+        let (param_types, return_type) = self
+            .function_sigs
+            .get(name)
+            .ok_or_else(|| format!("undefined function '{name}'"))?
+            .clone();
+        let arg_values: Vec<BasicMetadataValueEnum> = args
+            .iter()
+            .zip(param_types.iter())
+            .map(|(a, &pty)| {
+                let v = self.compile_expr(a)?;
+                Ok(self.coerce_to_type(v, pty).into())
+            })
+            .collect::<Result<_, String>>()?;
+        let call = self.builder.build_call(function, &arg_values, "call").unwrap();
+        let result = call.try_as_basic_value().basic();
+        if let (Type::BigNum(_), Some(result)) = (return_type, result) {
+            let ptr = self.unwrap_bignum_ptr(result);
+            self.bignum_temps.push((ptr, result));
+        }
+        Ok(result)
     }
 
     /// The printf-style format fragment (no surrounding text), matching

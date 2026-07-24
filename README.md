@@ -8,7 +8,7 @@ CyborgPL is a hobby programming language that compiles to native machine code vi
 
 - A full pipeline: lexer → parser → AST → LLVM codegen → native object file → linked binary (via [inkwell](https://github.com/TheDan64/inkwell)).
 - `var:type 'name' = value;` variable declarations, with `ref:var:type 'name'` for every read/write reference.
-- `START ... END` as the program's entry point; `func 'name'*'param': type, ...* -> type { ... }` for function definitions, called via `ref:func 'name'*arg, arg, ...*` (mirroring `print*...*`'s own bracketing of a list of things).
+- `START ... END` as the program's entry point; `func 'name'*'param': type, ...* -> type { ... }` for function definitions, called via `ref:func 'name'*arg, arg, ...*` (mirroring `print*...*`'s own bracketing of a list of things). Parameters and return types support `[precision:N]` and `bignum` — arguments are coerced to match, and a returned `bignum` is always an independent copy the caller owns.
 - `if`/`else`, `while`, and real lexical block scoping (a variable declared inside a block is gone once the block ends).
 - Every value (a literal or a `ref:var:type 'name'` reference) must be individually wrapped in `( )` to be used in any expression — `(a) + (b)`, not `a + b`. A reassignment's target is the one exception (`ref:var:type 'name' = ...` stays bare, since it's a place, not a value); a function call doesn't need an extra wrap around the whole call either, though each argument still needs its own.
 - `print*"literal text" (expr) "more text"*;` — literal and computed segments mixed freely; a computed segment needs no separate marker of its own since every value already starts with `(` (or a function-call name), which is enough to tell it apart from literal text.

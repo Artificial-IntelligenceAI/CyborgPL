@@ -65,6 +65,7 @@ impl Parser {
                 let pname = self.expect_quoted_ident()?;
                 self.expect(Token::Colon)?;
                 let ty = self.parse_type()?;
+                let ty = self.parse_optional_precision(ty)?;
                 params.push(Param { name: pname, ty });
                 if self.check(&Token::Comma) {
                     self.advance();
@@ -77,7 +78,8 @@ impl Parser {
 
         let return_type = if self.check(&Token::Arrow) {
             self.advance();
-            self.parse_type()?
+            let ty = self.parse_type()?;
+            self.parse_optional_precision(ty)?
         } else {
             Type::Void
         };
