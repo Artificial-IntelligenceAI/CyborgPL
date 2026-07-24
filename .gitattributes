@@ -1,0 +1,4 @@
+# Excludes the cross-language benchmark comparison scripts from GitHub's
+# language-detection stats -- they exist to show what Python/Rust/Java look
+# like for comparison, not as part of the actual CyborgPL compiler.
+benchmarks/** linguist-vendored
