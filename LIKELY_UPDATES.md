@@ -8,6 +8,7 @@ A running note of things that have come up as likely next steps or known gaps wh
 - Whether real lexical block scoping (added for automatic bignum/str cleanup) should extend further.
 - `numw`'s magnitude-word vocabulary is currently a fixed list (thousand/million/billion/trillion/quadrillion/quintillion) and only accepts one word after the number — no compound number words (`'one hundred thousand'`) and no expanding the list without a design decision.
 - Whether `input:` should ever grow a built-in prompt (e.g. `input:str 'name' "Enter your name: ";`), or support `numw`/`bignum` — deliberately left out of the first version; right now you `print` your own prompt text first, and only `str`/`num` can be read.
+- Whether `clock:` should ever support absolute/wall-clock time (not just elapsed-since-start), or a `bignum`/higher-precision variant for very short spans — deliberately left out of the first version; right now it's `num` only.
 
 ## Known implementation gaps
 

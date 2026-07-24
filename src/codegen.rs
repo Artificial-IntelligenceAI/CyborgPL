@@ -123,6 +123,10 @@ pub struct Codegen<'ctx> {
     /// value with no extra strdup needed.
     read_line_fn: FunctionValue<'ctx>,
     read_num_fn: FunctionValue<'ctx>,
+    /// runtime/clock/clock_shim.c -- `clock:num`, elapsed seconds since
+    /// the program started (captured once, before `main`, not from the
+    /// first `clock:num` read).
+    clock_elapsed_fn: FunctionValue<'ctx>,
     bignum: BignumFns<'ctx>,
 }
 
@@ -159,6 +163,9 @@ impl<'ctx> Codegen<'ctx> {
 
         let read_num_type = f64_type.fn_type(&[], false);
         let read_num_fn = module.add_function("cyborg_read_num", read_num_type, Some(Linkage::External));
+
+        let clock_elapsed_type = f64_type.fn_type(&[], false);
+        let clock_elapsed_fn = module.add_function("cyborg_clock_elapsed", clock_elapsed_type, Some(Linkage::External));
 
         // runtime/gmp/bignum_shim.c -- every handle is an opaque i8_ptr, so
         // these signatures are the same shape regardless of what GMP itself
@@ -253,6 +260,7 @@ impl<'ctx> Codegen<'ctx> {
             strdup_fn,
             read_line_fn,
             read_num_fn,
+            clock_elapsed_fn,
             bignum,
         }
     }
@@ -769,6 +777,41 @@ impl<'ctx> Codegen<'ctx> {
                         self.coerce_float(raw, width).into()
                     }
                     other => panic!("input not supported for {other:?} yet"),
+                };
+
+                let llvm_ty = self.basic_type(*ty);
+                let alloca = self.builder.build_alloca(llvm_ty, name).unwrap();
+                self.builder.build_store(alloca, value).unwrap();
+                self.declare_scoped(key.clone());
+                self.variables.insert(key, (alloca, llvm_ty));
+            }
+            Stmt::Clock(name, ty) => {
+                let key = (name.clone(), *ty);
+
+                // Same redeclare-vs-shadow distinction as VarDecl/Input
+                // above -- Num never needs freeing, but kept for
+                // consistency if this ever grows more types.
+                if self.declared_in_current_scope(&key) {
+                    match *ty {
+                        Type::BigNum(_) => self.free_bignum_var(&key),
+                        Type::Str => self.free_str_var(&key),
+                        _ => {}
+                    }
+                }
+
+                let value: BasicValueEnum = match *ty {
+                    Type::Num(width) => {
+                        let raw = self
+                            .builder
+                            .build_call(self.clock_elapsed_fn, &[], "clock_elapsed_call")
+                            .unwrap()
+                            .try_as_basic_value()
+                            .basic()
+                            .unwrap()
+                            .into_float_value();
+                        self.coerce_float(raw, width).into()
+                    }
+                    other => panic!("clock not supported for {other:?} yet"),
                 };
 
                 let llvm_ty = self.basic_type(*ty);

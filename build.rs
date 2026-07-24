@@ -46,4 +46,12 @@ fn main() {
         .compile("cyborgpl_io");
     println!("cargo:rustc-env=CYBORGPL_IO_LIB={out_dir}/libcyborgpl_io.a");
     println!("cargo:rerun-if-changed=runtime/io/input_shim.c");
+
+    cc::Build::new()
+        .file("runtime/clock/clock_shim.c")
+        .opt_level(2)
+        .flag("-mmacosx-version-min=26.0")
+        .compile("cyborgpl_clock");
+    println!("cargo:rustc-env=CYBORGPL_CLOCK_LIB={out_dir}/libcyborgpl_clock.a");
+    println!("cargo:rerun-if-changed=runtime/clock/clock_shim.c");
 }

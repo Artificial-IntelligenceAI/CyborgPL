@@ -96,6 +96,7 @@ fn main() {
         .arg(format!("-L{}", env!("CYBORGPL_GMP_LIB_DIR")))
         .arg("-lgmp")
         .arg(env!("CYBORGPL_IO_LIB")) // our stdin shim, for input:str/input:num
+        .arg(env!("CYBORGPL_CLOCK_LIB")) // our clock shim, for clock:num
         .status()
         .expect("failed to invoke cc");
     if !status.success() {

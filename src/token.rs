@@ -31,6 +31,9 @@ pub enum Token {
     Print,
     /// `input:type 'name';` -- reads a line from stdin into a new variable.
     Input,
+    /// `clock:num 'name';` -- reads elapsed time since the program started
+    /// (in seconds) into a new variable.
+    Clock,
     /// Marks the start of the program's entry point block (replaces `fn main`).
     Start,
     End,
@@ -95,6 +98,7 @@ impl Token {
             "false" => Some(Token::False),
             "print" => Some(Token::Print),
             "input" => Some(Token::Input),
+            "clock" => Some(Token::Clock),
             "not" => Some(Token::Not),
             "START" => Some(Token::Start),
             "END" => Some(Token::End),

@@ -144,6 +144,9 @@ pub enum Stmt {
     /// stdin at runtime, rather than from a compiled expression. Currently
     /// only `Str` and `Num` support this.
     Input(String, Type),
+    /// `clock:num 'name';` -- declares 'name' and reads elapsed seconds
+    /// since the program started. Currently only `Num` supports this.
+    Clock(String, Type),
     Assign(String, Type, Expr),
     Return(Option<Expr>),
     Print(Vec<PrintSegment>),

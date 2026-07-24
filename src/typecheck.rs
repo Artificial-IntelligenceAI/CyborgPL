@@ -152,6 +152,12 @@ impl TypeChecker {
                 }
                 self.declare(name.clone(), *ty);
             }
+            Stmt::Clock(name, ty) => {
+                if !matches!(ty, Type::Num(_)) {
+                    self.error(format!("clock: doesn't support {ty} yet (only num)"));
+                }
+                self.declare(name.clone(), *ty);
+            }
             Stmt::Assign(name, ty, expr) => {
                 let key = (name.clone(), *ty);
                 if !self.vars.contains(&key) {
