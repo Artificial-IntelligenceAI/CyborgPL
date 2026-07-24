@@ -11,6 +11,7 @@ A running note of things that have come up as likely next steps or known gaps wh
 
 ## Known implementation gaps
 
+- `str` is always a compile-time global constant — there's no runtime string construction or concatenation yet. This is also why `str` needs no memory management at all (nothing is ever heap-allocated for it), unlike `bignum`.
 - Intermediate bignum binary-op results always compute at the default precision (256 bits) regardless of operand precision, unlike `num`'s "widen to the larger operand" behavior.
 - No LLVM optimization passes run on generated code (`mem2reg`, inlining, etc.) — deliberately deprioritized until the language's basics are finished.
 
