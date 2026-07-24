@@ -9,6 +9,8 @@ A running note of things that have come up as likely next steps or known gaps wh
 - `numw`'s magnitude-word vocabulary is currently a fixed list (thousand/million/billion/trillion/quadrillion/quintillion) and only accepts one word after the number — no compound number words (`'one hundred thousand'`) and no expanding the list without a design decision.
 - Whether `input:` should ever grow a built-in prompt (e.g. `input:str 'name' "Enter your name: ";`), or support `numw`/`bignum` — deliberately left out of the first version; right now you `print` your own prompt text first, and only `str`/`num` can be read.
 - Whether `clock:` should ever support absolute/wall-clock time (not just elapsed-since-start), or a `bignum`/higher-precision variant for very short spans — deliberately left out of the first version; right now it's `num` only.
+- Reading from a file — deliberately deferred; `print`/`overwrite` only write for now. Whatever syntax it gets should probably mirror `input:`'s shape (`input:type 'name' [from*(dest)*];`?), but that's undecided.
+- Whether file writing should ever support append (only overwrite exists now), or whether `[to*(dest)*]` should extend to any other destination beyond a file.
 
 ## Known implementation gaps
 
@@ -20,6 +22,5 @@ A running note of things that have come up as likely next steps or known gaps wh
 ## Bigger, not-yet-started ideas
 
 - True arbitrary precision beyond what GMP's `mpf_t` offers, or a fixed-width 256-bit float type — discussed as a much larger undertaking, unstarted.
-- Persistent storage (writing to / reading from a file) — right now `input:`/`print` cover stdin/stdout only; nothing a program does outlives the process. Would need its own syntax (maybe a `write:`/`read:file` pair, parallel to `input:`) and its own design conversation.
 
 Nothing here is a promise. It's context for whoever — human or AI — picks this project up next.

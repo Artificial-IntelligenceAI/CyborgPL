@@ -29,7 +29,7 @@ fn shape_of(ty: Type) -> Shape {
     match ty {
         Type::Num(_) | Type::NumW(_) => Shape::Float,
         Type::Bool => Shape::Int,
-        Type::Str => Shape::Str,
+        Type::Str | Type::File => Shape::Str,
         Type::BigNum(_) => Shape::BigNum,
         Type::Void => panic!("Void has no runtime shape; should never reach type-checking"),
     }
@@ -193,12 +193,15 @@ impl TypeChecker {
                     }
                 }
             },
-            Stmt::Print(segments) => {
-                for seg in segments {
-                    if let PrintSegment::Expr(e) = seg {
-                        self.check_expr(e);
-                    }
+            Stmt::Print(segments, dest) => {
+                self.check_print_segments(segments);
+                if let Some(dest_expr) = dest {
+                    self.check_dest(dest_expr);
                 }
+            }
+            Stmt::Overwrite(segments, dest) => {
+                self.check_print_segments(segments);
+                self.check_dest(dest);
             }
             Stmt::ExprStmt(expr) => match expr {
                 // A call as a bare statement discards its result (even a
@@ -229,6 +232,28 @@ impl TypeChecker {
         if let Some(cty) = self.check_expr(cond) {
             if cty != Type::Bool {
                 self.error(format!("condition must be bool, got {cty}"));
+            }
+        }
+    }
+
+    /// Shared by `print` and `overwrite`: checks each computed segment's
+    /// own expression.
+    fn check_print_segments(&mut self, segments: &[PrintSegment]) {
+        for seg in segments {
+            if let PrintSegment::Expr(e) = seg {
+                self.check_expr(e);
+            }
+        }
+    }
+
+    /// Checks a `[to*(dest)*]` clause's destination: must be `str` or
+    /// `file`, matching `compile_write_to_file`'s codegen (which just
+    /// reads the pointer, so any bare-pointer-shaped type would technically
+    /// "work," but only these two are meant to be used this way).
+    fn check_dest(&mut self, dest: &Expr) {
+        if let Some(ty) = self.check_expr(dest) {
+            if !matches!(ty, Type::Str | Type::File) {
+                self.error(format!("[to*...*] destination must be str or file, got {ty}"));
             }
         }
     }
@@ -394,14 +419,18 @@ impl TypeChecker {
 /// - Anything except `bool` coerces into `bignum` (float-shaped values via
 ///   `bignum_set_d`, `str` via `bignum_set_str` for numeric-literal text,
 ///   another `bignum` via a copy).
-/// - `str` only coerces from `str` (turning another type into text needs
-///   an explicit `stch`, which bypasses this rule entirely).
+/// - `str` and `file` freely interconvert with each other (`file` is just
+///   a typed path string), but neither coerces from anything else --
+///   turning another type into text needs an explicit `stch`, which
+///   bypasses this rule entirely.
 /// - `bool` only coerces from `bool`.
 fn coercible(from: Type, to: Type) -> bool {
     match (from, to) {
         (Type::Num(_) | Type::NumW(_), Type::Num(_) | Type::NumW(_)) => true,
         (Type::Num(_) | Type::NumW(_) | Type::Str | Type::BigNum(_), Type::BigNum(_)) => true,
-        (Type::Str, Type::Str) => true,
+        // `file` is just a typed path string -- freely interchangeable
+        // with `str`, the same relationship `num`/`numw` already have.
+        (Type::Str | Type::File, Type::Str | Type::File) => true,
         (Type::Bool, Type::Bool) => true,
         _ => false,
     }

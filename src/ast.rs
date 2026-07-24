@@ -21,6 +21,11 @@ pub enum Type {
     /// is in bits and can be any positive value, not restricted to Num's
     /// fixed 16/32/64/128 set.
     BigNum(u32),
+    /// A file path. Behaves exactly like `Str` at runtime -- same
+    /// automatic memory management, same bare-pointer shape -- it's its
+    /// own type purely for clarity at the type-system level, the same
+    /// relationship `NumW` has to `Num`.
+    File,
     Void,
 }
 
@@ -37,6 +42,7 @@ impl std::fmt::Display for Type {
             Type::Bool => write!(f, "bool"),
             Type::Str => write!(f, "str"),
             Type::BigNum(p) => write!(f, "bignum[precision:{p}]"),
+            Type::File => write!(f, "file"),
             Type::Void => write!(f, "void"),
         }
     }
@@ -149,7 +155,14 @@ pub enum Stmt {
     Clock(String, Type),
     Assign(String, Type, Expr),
     Return(Option<Expr>),
-    Print(Vec<PrintSegment>),
+    /// The optional `[to*(dest)*]` clause -- `None` prints to the screen
+    /// as always; `Some(dest)` redirects this call to that file instead
+    /// (`dest` must be `Str` or `File`).
+    Print(Vec<PrintSegment>, Option<Expr>),
+    /// `overwrite*segments* [to*(dest)*];` -- same segment-based text
+    /// building as `Print`, but `dest` is required: this only ever writes
+    /// to a file (replacing its entire content), never the screen.
+    Overwrite(Vec<PrintSegment>, Expr),
     ExprStmt(Expr),
     If(Expr, Block, Option<Block>),
     While(Expr, Block),

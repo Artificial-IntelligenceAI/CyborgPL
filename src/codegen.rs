@@ -127,6 +127,13 @@ pub struct Codegen<'ctx> {
     /// the program started (captured once, before `main`, not from the
     /// first `clock:num` read).
     clock_elapsed_fn: FunctionValue<'ctx>,
+    /// runtime/io/file_shim.c -- `cyborg_fopen_or_die` backs `print`'s
+    /// (optional) and `overwrite`'s (required) `[to*(dest)*]` clause;
+    /// crashes with a clear message rather than codegen having to emit its
+    /// own null-check IR. `fprintf_fn`/`fclose_fn` are plain libc.
+    fopen_or_die_fn: FunctionValue<'ctx>,
+    fprintf_fn: FunctionValue<'ctx>,
+    fclose_fn: FunctionValue<'ctx>,
     bignum: BignumFns<'ctx>,
 }
 
@@ -166,6 +173,15 @@ impl<'ctx> Codegen<'ctx> {
 
         let clock_elapsed_type = f64_type.fn_type(&[], false);
         let clock_elapsed_fn = module.add_function("cyborg_clock_elapsed", clock_elapsed_type, Some(Linkage::External));
+
+        let fopen_or_die_type = i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false);
+        let fopen_or_die_fn = module.add_function("cyborg_fopen_or_die", fopen_or_die_type, Some(Linkage::External));
+
+        let fprintf_type = context.i32_type().fn_type(&[i8_ptr.into(), i8_ptr.into()], true);
+        let fprintf_fn = module.add_function("fprintf", fprintf_type, Some(Linkage::External));
+
+        let fclose_type = context.i32_type().fn_type(&[i8_ptr.into()], false);
+        let fclose_fn = module.add_function("fclose", fclose_type, Some(Linkage::External));
 
         // runtime/gmp/bignum_shim.c -- every handle is an opaque i8_ptr, so
         // these signatures are the same shape regardless of what GMP itself
@@ -261,6 +277,9 @@ impl<'ctx> Codegen<'ctx> {
             read_line_fn,
             read_num_fn,
             clock_elapsed_fn,
+            fopen_or_die_fn,
+            fprintf_fn,
+            fclose_fn,
             bignum,
         }
     }
@@ -309,7 +328,7 @@ impl<'ctx> Codegen<'ctx> {
             Type::Num(width) => self.float_type_for(width).into(),
             Type::NumW(width) => self.float_type_for(width).into(),
             Type::Bool => self.context.bool_type().into(),
-            Type::Str => self.context.ptr_type(AddressSpace::default()).into(),
+            Type::Str | Type::File => self.context.ptr_type(AddressSpace::default()).into(),
             Type::BigNum(_) => self.bignum_struct_type().into(),
             Type::Void => panic!("void has no runtime representation"),
         }
@@ -435,7 +454,7 @@ impl<'ctx> Codegen<'ctx> {
             (BasicValueEnum::FloatValue(f), Type::Num(width)) => self.coerce_float(f, width).into(),
             (BasicValueEnum::FloatValue(f), Type::NumW(width)) => self.coerce_float(f, width).into(),
             (_, Type::BigNum(precision)) => self.coerce_to_bignum(value, precision),
-            (BasicValueEnum::PointerValue(p), Type::Str) => self
+            (BasicValueEnum::PointerValue(p), Type::Str | Type::File) => self
                 .builder
                 .build_call(self.strdup_fn, &[p.into()], "str_own_call")
                 .unwrap()
@@ -560,7 +579,7 @@ impl<'ctx> Codegen<'ctx> {
             if emit_frees {
                 match entry.key() {
                     (_, Type::BigNum(_)) => self.free_bignum_var(entry.key()),
-                    (_, Type::Str) => self.free_str_var(entry.key()),
+                    (_, Type::Str | Type::File) => self.free_str_var(entry.key()),
                     _ => {}
                 }
             }
@@ -595,7 +614,7 @@ impl<'ctx> Codegen<'ctx> {
             Type::Num(width) => self.float_type_for(width).fn_type(&param_types, false),
             Type::NumW(width) => self.float_type_for(width).fn_type(&param_types, false),
             Type::Bool => self.context.bool_type().fn_type(&param_types, false),
-            Type::Str => self.context.ptr_type(AddressSpace::default()).fn_type(&param_types, false),
+            Type::Str | Type::File => self.context.ptr_type(AddressSpace::default()).fn_type(&param_types, false),
             Type::BigNum(_) => self.bignum_struct_type().fn_type(&param_types, false),
             Type::Void => self.context.void_type().fn_type(&param_types, false),
         };
@@ -684,7 +703,7 @@ impl<'ctx> Codegen<'ctx> {
                     let zero = self.context.bool_type().const_int(0, false);
                     self.builder.build_return(Some(&zero)).unwrap();
                 }
-                Type::Str => {
+                Type::Str | Type::File => {
                     let null = self.context.ptr_type(AddressSpace::default()).const_null();
                     self.builder.build_return(Some(&null)).unwrap();
                 }
@@ -732,7 +751,7 @@ impl<'ctx> Codegen<'ctx> {
                 if self.declared_in_current_scope(&key) {
                     match *ty {
                         Type::BigNum(_) => self.free_bignum_var(&key),
-                        Type::Str => self.free_str_var(&key),
+                        Type::Str | Type::File => self.free_str_var(&key),
                         _ => {}
                     }
                 }
@@ -750,7 +769,7 @@ impl<'ctx> Codegen<'ctx> {
                 if self.declared_in_current_scope(&key) {
                     match *ty {
                         Type::BigNum(_) => self.free_bignum_var(&key),
-                        Type::Str => self.free_str_var(&key),
+                        Type::Str | Type::File => self.free_str_var(&key),
                         _ => {}
                     }
                 }
@@ -794,7 +813,7 @@ impl<'ctx> Codegen<'ctx> {
                 if self.declared_in_current_scope(&key) {
                     match *ty {
                         Type::BigNum(_) => self.free_bignum_var(&key),
-                        Type::Str => self.free_str_var(&key),
+                        Type::Str | Type::File => self.free_str_var(&key),
                         _ => {}
                     }
                 }
@@ -883,13 +902,13 @@ impl<'ctx> Codegen<'ctx> {
                     .rev()
                     .flat_map(|frame| frame.iter().rev())
                     .map(ScopeEntry::key)
-                    .filter(|key| matches!(key.1, Type::BigNum(_) | Type::Str))
+                    .filter(|key| matches!(key.1, Type::BigNum(_) | Type::Str | Type::File))
                     .cloned()
                     .collect();
                 for key in &to_free {
                     match key.1 {
                         Type::BigNum(_) => self.free_bignum_var(key),
-                        Type::Str => self.free_str_var(key),
+                        Type::Str | Type::File => self.free_str_var(key),
                         _ => unreachable!(),
                     }
                 }
@@ -902,38 +921,37 @@ impl<'ctx> Codegen<'ctx> {
                     }
                 };
             }
-            Stmt::Print(segments) => {
-                let mut fmt = String::new();
-                let mut args: Vec<BasicMetadataValueEnum> = Vec::new();
-                let mut to_free: Vec<PointerValue<'ctx>> = Vec::new();
-                for seg in segments {
-                    match seg {
-                        // Literal text is inserted as-is, except any '%' it
-                        // contains must be escaped so printf's own format
-                        // parser doesn't mistake it for a specifier.
-                        PrintSegment::Str(s) => fmt.push_str(&s.replace('%', "%%")),
-                        PrintSegment::Expr(e) => {
-                            let value = self.compile_expr(e)?;
-                            let (frag, arg, maybe_free) = self.value_fmt(value);
-                            fmt.push_str(frag);
-                            args.push(arg);
-                            if let Some(ptr) = maybe_free {
-                                to_free.push(ptr);
-                            }
-                        }
-                    }
-                }
-                fmt.push('\n');
-
+            Stmt::Print(segments, dest) => {
+                let (fmt, args, to_free) = self.compile_print_segments(segments)?;
                 let fmt_global = self.builder.build_global_string_ptr(&fmt, "fmt").unwrap();
                 let mut call_args: Vec<BasicMetadataValueEnum> = vec![fmt_global.as_pointer_value().into()];
                 call_args.extend(args);
-                self.builder.build_call(self.printf_fn, &call_args, "printf_call").unwrap();
 
-                // Only after printf has actually consumed them: each
+                match dest {
+                    None => {
+                        self.builder.build_call(self.printf_fn, &call_args, "printf_call").unwrap();
+                    }
+                    Some(dest_expr) => {
+                        self.compile_write_to_file(dest_expr, &call_args)?;
+                    }
+                }
+
+                // Only after the write has actually consumed them: each
                 // bignum's formatted string is a fresh malloc'd buffer
                 // (GMP's default allocator) that nothing else references
-                // once this print call is done with it.
+                // once this call is done with it.
+                for ptr in to_free {
+                    self.builder.build_call(self.libc_free, &[ptr.into()], "bignum_fmt_free_call").unwrap();
+                }
+            }
+            Stmt::Overwrite(segments, dest) => {
+                let (fmt, args, to_free) = self.compile_print_segments(segments)?;
+                let fmt_global = self.builder.build_global_string_ptr(&fmt, "fmt").unwrap();
+                let mut call_args: Vec<BasicMetadataValueEnum> = vec![fmt_global.as_pointer_value().into()];
+                call_args.extend(args);
+
+                self.compile_write_to_file(dest, &call_args)?;
+
                 for ptr in to_free {
                     self.builder.build_call(self.libc_free, &[ptr.into()], "bignum_fmt_free_call").unwrap();
                 }
@@ -1290,6 +1308,67 @@ impl<'ctx> Codegen<'ctx> {
             self.str_temps.push(result.into_pointer_value());
         }
         Ok(result)
+    }
+
+    /// Compiles `segments` into a combined printf-style format string
+    /// (with the trailing newline print/overwrite always add) plus its
+    /// argument list and any bignum-formatted buffers that need freeing
+    /// once whichever function actually consumes them (`printf` or
+    /// `fprintf`) is done. Shared by `Stmt::Print` and `Stmt::Overwrite`,
+    /// which differ only in *where* the result gets written.
+    fn compile_print_segments(
+        &mut self,
+        segments: &[PrintSegment],
+    ) -> Result<(String, Vec<BasicMetadataValueEnum<'ctx>>, Vec<PointerValue<'ctx>>), String> {
+        let mut fmt = String::new();
+        let mut args: Vec<BasicMetadataValueEnum> = Vec::new();
+        let mut to_free: Vec<PointerValue<'ctx>> = Vec::new();
+        for seg in segments {
+            match seg {
+                // Literal text is inserted as-is, except any '%' it
+                // contains must be escaped so printf's own format parser
+                // doesn't mistake it for a specifier.
+                PrintSegment::Str(s) => fmt.push_str(&s.replace('%', "%%")),
+                PrintSegment::Expr(e) => {
+                    let value = self.compile_expr(e)?;
+                    let (frag, arg, maybe_free) = self.value_fmt(value);
+                    fmt.push_str(frag);
+                    args.push(arg);
+                    if let Some(ptr) = maybe_free {
+                        to_free.push(ptr);
+                    }
+                }
+            }
+        }
+        fmt.push('\n');
+        Ok((fmt, args, to_free))
+    }
+
+    /// Backs `print`'s (optional) and `overwrite`'s (required)
+    /// `[to*(dest)*]` clause: opens `dest` (a `str`/`file` path) for
+    /// writing -- crashing with a clear message via `cyborg_fopen_or_die`
+    /// if it can't be opened, rather than emitting our own null-check IR
+    /// -- writes `call_args` (already shaped like a `printf` call, format
+    /// string first) via `fprintf`, then closes the file. Always
+    /// overwrites the destination's entire content; there's no append yet.
+    fn compile_write_to_file(&mut self, dest: &Expr, call_args: &[BasicMetadataValueEnum<'ctx>]) -> Result<(), String> {
+        let dest_value = self.compile_expr(dest)?;
+        let path_ptr = dest_value.into_pointer_value();
+        let mode = self.builder.build_global_string_ptr("w", "write_mode").unwrap();
+        let file = self
+            .builder
+            .build_call(self.fopen_or_die_fn, &[path_ptr.into(), mode.as_pointer_value().into()], "fopen_call")
+            .unwrap()
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_pointer_value();
+
+        let mut fprintf_args: Vec<BasicMetadataValueEnum> = vec![file.into()];
+        fprintf_args.extend(call_args.iter().copied());
+        self.builder.build_call(self.fprintf_fn, &fprintf_args, "fprintf_call").unwrap();
+        self.builder.build_call(self.fclose_fn, &[file.into()], "fclose_call").unwrap();
+        Ok(())
     }
 
     /// The printf-style format fragment (no surrounding text), matching

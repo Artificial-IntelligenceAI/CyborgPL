@@ -21,6 +21,7 @@ CyborgPL is a hobby programming language that compiles to native machine code vi
 - `input:type 'name';` — reads a line from stdin into a new variable, for `str` (the raw line) or `num` (parsed as a number; invalid/non-numeric input is a fatal runtime error with a clear message, not a silent default). No built-in prompt — `print` your own prompt text first.
 - A static type-checking pass runs between parsing and codegen, catching type mistakes (a wrong type stated at `ref:var:TYPE`, mismatched operator operands, wrong function argument types/count, a non-`bool` `if`/`while` condition, a returned value that doesn't match the declared return type) with clear, readable errors — instead of a Rust-level panic or a confusing generic message. It doesn't change what's *allowed*: every coercion codegen already does (num/numw mixing at any precision, num/numw promoting into bignum, etc.) still works exactly the same; this only adds clearer errors for what already didn't work.
 - `clock:num 'name';` — reads elapsed seconds (as a decimal) since the program started into a new variable. Read it before and after any span of code (a loop, a function call) and subtract to measure how long it took.
+- `file`: a path string, behaving exactly like `str` (same automatic memory management, freely interchangeable with `str`) but its own type for clarity. Writing: `print*...* [to*(dest)*];` optionally redirects one `print` call to the file at `dest` instead of the screen; `overwrite*...* [to*(dest)*];` always writes to a file (never the screen). Both always replace the destination's entire content (no append), and both crash with a clear message if the file can't be opened. `dest` can be a `file` or a plain `str` path directly. Reading from a file isn't supported yet.
 
 ## Requirements
 
@@ -109,6 +110,7 @@ The language design is mine; Claude Code implemented it. To be specific about wh
 - `input:type 'name';` for reading stdin — a dedicated declaration statement rather than treating `input` as a value; crashing on invalid `num` input rather than silently defaulting to 0
 - The decision to add a real type checker, and to keep it purely additive — every existing auto-coercion still works exactly as before, it only replaces confusing errors with clear ones, rather than becoming stricter
 - `clock:num 'name';` — elapsed time since the program started (not absolute/wall-clock time), as a dedicated declare-statement mirroring `input:`'s shape
+- File writing: `[to*(dest)*]` as a literal bracketed clause (optional on `print`, required on `overwrite`) rather than a value-position keyword; `overwrite` (not "write") to name that it always replaces the whole file; always-overwrite rather than append; crash with a clear message on failure, matching `input:num`'s precedent; `file` as its own type (freely interchangeable with `str`) rather than reusing `str` directly
 
 **Defaulted by Claude** (conventional choices from the first scaffolding commit, never revisited):
 - `if`/`else`/`while` keywords and brace-delimited blocks

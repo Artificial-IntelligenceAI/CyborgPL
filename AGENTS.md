@@ -18,6 +18,7 @@ Backend/implementation choices — how codegen works internally, which crate to 
 - `runtime/fp128/quadmath.c` — a from-scratch software implementation of IEEE-754 quad precision (128-bit floats), since Apple's toolchain has no native 128-bit float type. `runtime/fp128/test_quadmath.c` is its standalone correctness harness (run it directly if you ever touch `quadmath.c`).
 - `runtime/gmp/bignum_shim.c` — a thin C wrapper around GMP's `mpf_t`, giving `bignum` simple fixed function signatures to call from LLVM IR.
 - `runtime/io/input_shim.c` — backs `input:str`/`input:num`, reading a line from stdin via `getline`.
+- `runtime/io/file_shim.c` — backs `print`'s/`overwrite`'s `[to*(dest)*]` file destination; `cyborg_fopen_or_die` wraps `fopen` and crashes with a clear message instead of codegen having to emit its own null-check IR.
 - `runtime/clock/clock_shim.c` — backs `clock:num`, elapsed seconds since the program started via `clock_gettime(CLOCK_MONOTONIC, ...)`, with the start timestamp captured by a C constructor that runs before `main`.
 - `examples/*.cyborgpl` — working example programs, all verified to actually run, not just written and assumed correct.
 

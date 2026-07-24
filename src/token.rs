@@ -34,6 +34,13 @@ pub enum Token {
     /// `clock:num 'name';` -- reads elapsed time since the program started
     /// (in seconds) into a new variable.
     Clock,
+    /// `overwrite*segments* [to*(dest)*];` -- always writes to a file
+    /// (replacing its entire content), never the screen. Same
+    /// segment-based text building `print` uses.
+    Overwrite,
+    /// `[to*(dest)*]` -- the file-destination clause `print` (optionally)
+    /// and `overwrite` (always) can take.
+    To,
     /// Marks the start of the program's entry point block (replaces `fn main`).
     Start,
     End,
@@ -99,6 +106,8 @@ impl Token {
             "print" => Some(Token::Print),
             "input" => Some(Token::Input),
             "clock" => Some(Token::Clock),
+            "overwrite" => Some(Token::Overwrite),
+            "to" => Some(Token::To),
             "not" => Some(Token::Not),
             "START" => Some(Token::Start),
             "END" => Some(Token::End),

@@ -97,6 +97,7 @@ impl Parser {
             "bool" => Ok(Type::Bool),
             "str" => Ok(Type::Str),
             "bignum" => Ok(Type::BigNum(DEFAULT_BIGNUM_PRECISION)),
+            "file" => Ok(Type::File),
             other => Err(format!("unknown type '{other}'")),
         }
     }
@@ -185,6 +186,61 @@ impl Parser {
         Ok(stmts)
     }
 
+    /// Parses `*segments*` -- the literal/computed text-segment list shared
+    /// by `print` and `overwrite`. Consumes both surrounding `*`s.
+    fn parse_print_segments(&mut self) -> PResult<Vec<PrintSegment>> {
+        self.expect(Token::Star)?;
+        let mut segments = Vec::new();
+        loop {
+            match self.peek().clone() {
+                Token::Str(s) => {
+                    self.advance();
+                    segments.push(PrintSegment::Str(s));
+                }
+                // A computed segment is recognized just by seeing the
+                // start of an expression -- every value now begins with
+                // its own required '(' wrap, or a function call begins
+                // with `ref:func`, either of which is already enough to
+                // tell it apart from a literal Str segment. No separate
+                // print-specific marker needed anymore now that the
+                // general value grammar itself always starts
+                // unambiguously. A call fully consumes its own `*args*`
+                // before this loop checks for the closing `*` again, so
+                // there's no ambiguity between the two uses of `*`.
+                Token::LParen | Token::Ref | Token::Minus | Token::Not => {
+                    let value = self.parse_expr()?;
+                    segments.push(PrintSegment::Expr(value));
+                }
+                Token::Star => break,
+                other => {
+                    return Err(format!(
+                        "line {}: expected a \"literal\", a value, or the closing '*', found {:?}",
+                        self.tokens[self.pos].line, other
+                    ));
+                }
+            }
+        }
+        self.expect(Token::Star)?;
+        Ok(segments)
+    }
+
+    /// Parses an optional `[to*(dest)*]` file-destination clause -- `None`
+    /// if there's no `[` here at all. Whether `None` is actually allowed
+    /// (as for `print`) or must be rejected (as for `overwrite`, which
+    /// requires a destination) is the caller's job.
+    fn parse_to_clause(&mut self) -> PResult<Option<Expr>> {
+        if !self.check(&Token::LBracket) {
+            return Ok(None);
+        }
+        self.advance();
+        self.expect(Token::To)?;
+        self.expect(Token::Star)?;
+        let dest = self.parse_expr()?;
+        self.expect(Token::Star)?;
+        self.expect(Token::RBracket)?;
+        Ok(Some(dest))
+    }
+
     fn parse_stmt(&mut self) -> PResult<Stmt> {
         match self.peek() {
             Token::Var => {
@@ -269,41 +325,28 @@ impl Parser {
             }
             Token::Print => {
                 self.advance();
-                self.expect(Token::Star)?;
-                let mut segments = Vec::new();
-                loop {
-                    match self.peek().clone() {
-                        Token::Str(s) => {
-                            self.advance();
-                            segments.push(PrintSegment::Str(s));
-                        }
-                        // A computed segment is recognized just by seeing
-                        // the start of an expression -- every value now
-                        // begins with its own required '(' wrap, or a
-                        // function call begins with `ref:func`, either of
-                        // which is already enough to tell it apart from a
-                        // literal Str segment. No separate print-specific
-                        // marker needed anymore now that the general value
-                        // grammar itself always starts unambiguously. A call
-                        // fully consumes its own `*args*` before this loop
-                        // checks for the closing `*` again, so there's no
-                        // ambiguity between the two uses of `*`.
-                        Token::LParen | Token::Ref | Token::Minus | Token::Not => {
-                            let value = self.parse_expr()?;
-                            segments.push(PrintSegment::Expr(value));
-                        }
-                        Token::Star => break,
-                        other => {
-                            return Err(format!(
-                                "line {}: expected a \"literal\", a value, or the closing '*', found {:?}",
-                                self.tokens[self.pos].line, other
-                            ));
-                        }
-                    }
-                }
-                self.expect(Token::Star)?;
+                let segments = self.parse_print_segments()?;
+                let dest = self.parse_to_clause()?;
                 self.expect(Token::Semicolon)?;
-                Ok(Stmt::Print(segments))
+                Ok(Stmt::Print(segments, dest))
+            }
+            // Same segment-based text building as `print`, but the
+            // `[to*(dest)*]` destination is required -- this only ever
+            // writes to a file, never the screen.
+            Token::Overwrite => {
+                self.advance();
+                let segments = self.parse_print_segments()?;
+                let dest = match self.parse_to_clause()? {
+                    Some(dest) => dest,
+                    None => {
+                        return Err(format!(
+                            "line {}: overwrite requires a [to*(file)*] destination",
+                            self.tokens[self.pos].line
+                        ));
+                    }
+                };
+                self.expect(Token::Semicolon)?;
+                Ok(Stmt::Overwrite(segments, dest))
             }
             Token::If => {
                 self.advance();
