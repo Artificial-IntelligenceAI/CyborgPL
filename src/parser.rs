@@ -91,7 +91,7 @@ impl Parser {
         let name = self.expect_ident()?;
         match name.as_str() {
             "num" => Ok(Type::Num(DEFAULT_NUM_PRECISION)),
-            "numw" => Ok(Type::NumW),
+            "numw" => Ok(Type::NumW(DEFAULT_NUM_PRECISION)),
             "bool" => Ok(Type::Bool),
             "str" => Ok(Type::Str),
             "bignum" => Ok(Type::BigNum(DEFAULT_BIGNUM_PRECISION)),
@@ -101,7 +101,7 @@ impl Parser {
 
     /// Parses an optional `[precision:N]` suffix and applies it to `ty` if
     /// present, returning `ty` unchanged otherwise. Validated per-type:
-    /// `num` only accepts 16/32/64/128 (real hardware float widths);
+    /// `num`/`numw` only accept 16/32/64/128 (real hardware float widths);
     /// `bignum` accepts any positive whole number of bits (GMP doesn't
     /// care, it's not tied to a hardware format).
     fn parse_optional_precision(&mut self, ty: Type) -> PResult<Type> {
@@ -131,6 +131,12 @@ impl Parser {
                 }
                 Ok(Type::Num(n as u32))
             }
+            Type::NumW(_) => {
+                if ![16.0, 32.0, 64.0, 128.0].contains(&n) {
+                    return Err(format!("line {line}: numw precision must be 16, 32, 64, or 128, found {n}"));
+                }
+                Ok(Type::NumW(n as u32))
+            }
             Type::BigNum(_) => {
                 if n < 1.0 || n.fract() != 0.0 {
                     return Err(format!(
@@ -149,7 +155,7 @@ impl Parser {
     /// any ordinary numeric expression too, this is just an extra literal
     /// form layered on top, not a replacement for the general grammar.
     fn try_parse_numw_literal(&mut self, ty: Type) -> PResult<Option<Expr>> {
-        if ty != Type::NumW {
+        if !matches!(ty, Type::NumW(_)) {
             return Ok(None);
         }
         let line = self.tokens[self.pos].line;

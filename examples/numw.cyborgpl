@@ -13,4 +13,7 @@ ref:var:numw 'apples' = '2 million';
 print*"apples reassigned = " (ref:var:numw 'apples')*;
 print*"apples + 1 = " (ref:var:numw 'apples' + 1)*;
 
+var:numw 'small' = '5 thousand' [precision:16];
+print*"5 thousand at 16-bit = " (ref:var:numw[precision:16] 'small')*;
+
 END
