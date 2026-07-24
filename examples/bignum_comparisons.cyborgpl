@@ -10,9 +10,9 @@ print*"a != b = " (ref:var:bignum 'a') != (ref:var:bignum 'b')*;
 var:bignum 'counter' = (0);
 var:bignum 'limit' = (5);
 var:bignum 'one' = (1);
-while (ref:var:bignum 'counter') < (ref:var:bignum 'limit') {
+while (ref:var:bignum 'counter') < (ref:var:bignum 'limit') start
     print*"counter = " (ref:var:bignum 'counter')*;
     ref:var:bignum 'counter' = (ref:var:bignum 'counter') + (ref:var:bignum 'one');
-}
+end
 
 END

@@ -179,6 +179,18 @@ impl Parser {
         Ok(stmts)
     }
 
+    /// An `if`/`else`/`while` body: `start ... end`, distinct from a
+    /// function body's `{ ... }` (`parse_block` above).
+    fn parse_control_block(&mut self) -> PResult<Block> {
+        self.expect(Token::BlockStart)?;
+        let mut stmts = Vec::new();
+        while !self.check(&Token::BlockEnd) {
+            stmts.push(self.parse_stmt()?);
+        }
+        self.expect(Token::BlockEnd)?;
+        Ok(stmts)
+    }
+
     fn parse_stmt(&mut self) -> PResult<Stmt> {
         match self.peek() {
             Token::Var => {
@@ -279,10 +291,10 @@ impl Parser {
             Token::If => {
                 self.advance();
                 let cond = self.parse_expr()?;
-                let then_block = self.parse_block()?;
+                let then_block = self.parse_control_block()?;
                 let else_block = if self.check(&Token::Else) {
                     self.advance();
-                    Some(self.parse_block()?)
+                    Some(self.parse_control_block()?)
                 } else {
                     None
                 };
@@ -291,7 +303,7 @@ impl Parser {
             Token::While => {
                 self.advance();
                 let cond = self.parse_expr()?;
-                let body = self.parse_block()?;
+                let body = self.parse_control_block()?;
                 Ok(Stmt::While(cond, body))
             }
             _ => {

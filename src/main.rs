@@ -22,20 +22,20 @@ const DEFAULT_SOURCE: &str = r#"
     START
         var:num 'first' = (5);
         var:num 'second' = (2.5);
-        if (ref:var:num 'first') < (ref:var:num 'second') {
+        if (ref:var:num 'first') < (ref:var:num 'second') start
             print*ref:func 'add'*(ref:var:num 'first'), (ref:var:num 'second')**;
-        } else {
+        end else start
             print*(0)*;
-        }
+        end
 
         var:str 'greeting' = ("hello, cyborgpl");
         print*(ref:var:str 'greeting')*;
 
         var:num 'i' = (0);
-        while (ref:var:num 'i') < (3) {
+        while (ref:var:num 'i') < (3) start
             print*(ref:var:num 'i')*;
             ref:var:num 'i' = (ref:var:num 'i') + (1);
-        }
+        end
     END
 "#;
 
