@@ -28,11 +28,6 @@ pub enum Token {
     /// Marks the start of the program's entry point block (replaces `fn main`).
     Start,
     End,
-    /// Lowercase `start`/`end`: opens/closes an `if`/`else`/`while` body,
-    /// distinct from the uppercase `START`/`END` program entry point and
-    /// from a function body's `{ }`.
-    BlockStart,
-    BlockEnd,
     /// `x`: multiply. Replaces `*`, which is reserved for print's `*expr*` wrapper.
     Mul,
     /// `xx`: power/exponentiation.
@@ -88,8 +83,6 @@ impl Token {
             "print" => Some(Token::Print),
             "START" => Some(Token::Start),
             "END" => Some(Token::End),
-            "start" => Some(Token::BlockStart),
-            "end" => Some(Token::BlockEnd),
             "x" => Some(Token::Mul),
             "xx" => Some(Token::Pow),
             "xxx" => Some(Token::Tetration),
