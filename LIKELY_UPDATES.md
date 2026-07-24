@@ -17,7 +17,6 @@ A running note of things that have come up as likely next steps or known gaps wh
 - Bare numeric literals assigned to `bignum` lose precision beyond ~17 digits, since `Token::Num` parses through `f64` at the lexer stage (same as `num` always has). Fixing this properly means making `Token::Num` carry its original literal text everywhere — a bigger change than any single round so far.
 - Intermediate bignum binary-op results always compute at the default precision (256 bits) regardless of operand precision, unlike `num`'s "widen to the larger operand" behavior.
 - No LLVM optimization passes run on generated code (`mem2reg`, inlining, etc.) — deliberately deprioritized until the language's basics are finished.
-- No memory management for anything except `bignum` — `str` and its underlying allocations are never freed.
 
 ## Bigger, not-yet-started ideas
 

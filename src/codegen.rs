@@ -82,6 +82,11 @@ pub struct Codegen<'ctx> {
     printf_fn: FunctionValue<'ctx>,
     /// libm's `pow`, backing both `xx` (power) and `xxx` (tetration).
     pow_fn: FunctionValue<'ctx>,
+    /// libc's `free` -- used specifically for `bignum_to_string`'s
+    /// returned buffer (a plain malloc'd C string, GMP's default
+    /// allocator), never for an actual bignum handle (that's `bignum.free`,
+    /// which also runs `mpf_clear` first).
+    libc_free: FunctionValue<'ctx>,
     bignum: BignumFns<'ctx>,
 }
 
@@ -99,6 +104,9 @@ impl<'ctx> Codegen<'ctx> {
 
         let pow_type = f64_type.fn_type(&[f64_type.into(), f64_type.into()], false);
         let pow_fn = module.add_function("pow", pow_type, Some(Linkage::External));
+
+        let free_type = context.void_type().fn_type(&[i8_ptr.into()], false);
+        let libc_free = module.add_function("free", free_type, Some(Linkage::External));
 
         // runtime/gmp/bignum_shim.c -- every handle is an opaque i8_ptr, so
         // these signatures are the same shape regardless of what GMP itself
@@ -184,6 +192,7 @@ impl<'ctx> Codegen<'ctx> {
             bignum_temps: Vec::new(),
             printf_fn,
             pow_fn,
+            libc_free,
             bignum,
         }
     }
@@ -644,6 +653,7 @@ impl<'ctx> Codegen<'ctx> {
             Stmt::Print(segments) => {
                 let mut fmt = String::new();
                 let mut args: Vec<BasicMetadataValueEnum> = Vec::new();
+                let mut to_free: Vec<PointerValue<'ctx>> = Vec::new();
                 for seg in segments {
                     match seg {
                         // Literal text is inserted as-is, except any '%' it
@@ -652,9 +662,12 @@ impl<'ctx> Codegen<'ctx> {
                         PrintSegment::Str(s) => fmt.push_str(&s.replace('%', "%%")),
                         PrintSegment::Expr(e) => {
                             let value = self.compile_expr(e)?;
-                            let (frag, arg) = self.value_fmt(value);
+                            let (frag, arg, maybe_free) = self.value_fmt(value);
                             fmt.push_str(frag);
                             args.push(arg);
+                            if let Some(ptr) = maybe_free {
+                                to_free.push(ptr);
+                            }
                         }
                     }
                 }
@@ -664,6 +677,14 @@ impl<'ctx> Codegen<'ctx> {
                 let mut call_args: Vec<BasicMetadataValueEnum> = vec![fmt_global.as_pointer_value().into()];
                 call_args.extend(args);
                 self.builder.build_call(self.printf_fn, &call_args, "printf_call").unwrap();
+
+                // Only after printf has actually consumed them: each
+                // bignum's formatted string is a fresh malloc'd buffer
+                // (GMP's default allocator) that nothing else references
+                // once this print call is done with it.
+                for ptr in to_free {
+                    self.builder.build_call(self.libc_free, &[ptr.into()], "bignum_fmt_free_call").unwrap();
+                }
             }
             Stmt::ExprStmt(expr) => {
                 // Not compile_expr(expr): a call to a void function (the
@@ -952,16 +973,21 @@ impl<'ctx> Codegen<'ctx> {
         })
     }
 
-    /// The printf-style format fragment (no surrounding text) and matching
-    /// call argument for a compiled value. Used to build print's combined
-    /// format string across all of its segments.
-    fn value_fmt(&self, value: BasicValueEnum<'ctx>) -> (&'static str, BasicMetadataValueEnum<'ctx>) {
+    /// The printf-style format fragment (no surrounding text), matching
+    /// call argument, and -- only for a bignum's formatted string, which is
+    /// a fresh malloc'd buffer nothing else references -- a pointer the
+    /// caller must free once printf has actually consumed it. Used to
+    /// build print's combined format string across all of its segments.
+    fn value_fmt(
+        &self,
+        value: BasicValueEnum<'ctx>,
+    ) -> (&'static str, BasicMetadataValueEnum<'ctx>, Option<PointerValue<'ctx>>) {
         match value {
             // printf's varargs ABI expects `double` regardless of num's
             // declared precision (C's default argument promotion, which we
             // have to do explicitly since LLVM won't do it for us).
-            BasicValueEnum::FloatValue(f) => ("%g", self.coerce_float(f, 64).into()),
-            BasicValueEnum::PointerValue(p) => ("%s", p.into()),
+            BasicValueEnum::FloatValue(f) => ("%g", self.coerce_float(f, 64).into(), None),
+            BasicValueEnum::PointerValue(p) => ("%s", p.into(), None),
             BasicValueEnum::IntValue(i) => {
                 // Only bools (i1) reach here. The actual value is only known
                 // at runtime (it could come from a comparison, a variable,
@@ -974,7 +1000,7 @@ impl<'ctx> Codegen<'ctx> {
                     .builder
                     .build_select(i, true_str.as_pointer_value(), false_str.as_pointer_value(), "bool_str")
                     .unwrap();
-                ("%s", chosen.into())
+                ("%s", chosen.into(), None)
             }
             BasicValueEnum::StructValue(_) => {
                 let ptr = self.unwrap_bignum_ptr(value);
@@ -985,7 +1011,8 @@ impl<'ctx> Codegen<'ctx> {
                     .try_as_basic_value()
                     .basic()
                     .unwrap();
-                ("%s", str_ptr.into())
+                let str_ptr = str_ptr.into_pointer_value();
+                ("%s", str_ptr.into(), Some(str_ptr))
             }
             other => panic!("unsupported value for text formatting: {other:?}"),
         }
