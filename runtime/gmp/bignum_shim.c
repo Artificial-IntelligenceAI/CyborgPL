@@ -52,6 +52,13 @@ void bignum_neg(void *dst, void *src) {
     mpf_neg(*(mpf_t *)dst, *(mpf_t *)src);
 }
 
+// mpf_cmp's own return convention (negative/zero/positive) is exactly
+// what codegen needs -- it just compares the result against 0 with
+// whichever predicate (<, ==, etc.) the source actually asked for.
+int bignum_cmp(void *a, void *b) {
+    return mpf_cmp(*(mpf_t *)a, *(mpf_t *)b);
+}
+
 // GMP's mpf_t has no general pow(): mpf_pow_ui only takes a non-negative
 // integer exponent (its own real limitation, not a shortcut taken here).
 // Negative integer exponents are handled via reciprocal (base^-n = 1/base^n);

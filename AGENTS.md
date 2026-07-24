@@ -27,7 +27,6 @@ This codebase has a strong established pattern: nothing gets reported as working
 - Function parameter/return types don't fully support `bignum` or custom-precision `num` yet.
 - A `bignum` returned from a function *call* (as opposed to computed inline) currently leaks its handle — the automatic memory management covers named variables and binary-op intermediates, not this path yet.
 - Bare numeric literals assigned to `bignum` lose precision beyond ~17 digits (they route through `f64` at the lexer stage, same as `num`). Use a double-quoted string literal for high-precision `bignum` values instead.
-- Bignum comparisons aren't implemented.
 - Intermediate bignum binary-op results always compute at the default precision (256 bits), regardless of the operands' own precision.
 
 If you're fixing or extending any of the above, the fix belongs in `src/codegen.rs`'s bignum handling — read the surrounding comments there first, they explain the reasoning, not just the mechanism.

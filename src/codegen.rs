@@ -28,6 +28,9 @@ struct BignumFns<'ctx> {
     /// height into a loop trip count.
     get_i64: FunctionValue<'ctx>,
     neg: FunctionValue<'ctx>,
+    /// mpf_cmp's own convention (negative/zero/positive) -- codegen just
+    /// compares this against 0 with whichever predicate the source asked for.
+    cmp: FunctionValue<'ctx>,
 }
 
 /// One entry per variable declared directly in a block, remembering
@@ -162,6 +165,11 @@ impl<'ctx> Codegen<'ctx> {
             neg: module.add_function(
                 "bignum_neg",
                 void_ty.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            ),
+            cmp: module.add_function(
+                "bignum_cmp",
+                context.i32_type().fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
                 Some(Linkage::External),
             ),
         };
@@ -860,6 +868,37 @@ impl<'ctx> Codegen<'ctx> {
                     // fresh handle at *that* variable's declared precision),
                     // but an intermediate expression used elsewhere won't
                     // retroactively regain precision this step didn't have.
+                    // Comparisons return a bool (IntValue), not another
+                    // bignum -- a structurally different shape than every
+                    // other bignum binary op, so this needs its own arm
+                    // rather than fitting into the shim_fn dispatch below.
+                    // mpf_cmp itself doesn't allocate anything, so there's
+                    // no handle to register in bignum_temps here.
+                    (BasicValueEnum::StructValue(_), BasicValueEnum::StructValue(_))
+                        if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge) =>
+                    {
+                        let lp = self.unwrap_bignum_ptr(l);
+                        let rp = self.unwrap_bignum_ptr(r);
+                        let cmp = self
+                            .builder
+                            .build_call(self.bignum.cmp, &[lp.into(), rp.into()], "bignum_cmp_call")
+                            .unwrap()
+                            .try_as_basic_value()
+                            .basic()
+                            .unwrap()
+                            .into_int_value();
+                        let zero = self.context.i32_type().const_int(0, true);
+                        let predicate = match op {
+                            BinOp::Eq => IntPredicate::EQ,
+                            BinOp::Ne => IntPredicate::NE,
+                            BinOp::Lt => IntPredicate::SLT,
+                            BinOp::Gt => IntPredicate::SGT,
+                            BinOp::Le => IntPredicate::SLE,
+                            BinOp::Ge => IntPredicate::SGE,
+                            _ => unreachable!(),
+                        };
+                        self.builder.build_int_compare(predicate, cmp, zero, "bignum_cmp").unwrap().into()
+                    }
                     (BasicValueEnum::StructValue(_), BasicValueEnum::StructValue(_)) if op == &BinOp::Tetration => {
                         let lp = self.unwrap_bignum_ptr(l);
                         let rp = self.unwrap_bignum_ptr(r);

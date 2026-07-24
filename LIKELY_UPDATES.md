@@ -6,7 +6,6 @@ A running note of things that have come up as likely next steps or known gaps wh
 
 - Precision (`[precision:N]`) for function parameters and return types — currently only variable declarations support it.
 - Enforcing `ref:var:TYPE`'s stated type against the actual declaration — right now it's informational only ("clarity, for now"), since no real type checker exists yet.
-- Bignum comparisons (`<`, `==`, etc.) — not implemented at all.
 - Bignum through function parameters and return types — currently unsupported and untested.
 - Higher hyperoperator levels beyond `xxx` (tetration), if ever wanted.
 - Whether real lexical block scoping (added for automatic bignum cleanup) should extend further — e.g. shadowing edge cases, function-parameter scoping.
