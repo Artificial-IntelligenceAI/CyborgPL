@@ -7,12 +7,10 @@ func 'bignum_add'*'a': bignum, 'b': bignum* -> bignum {
 }
 
 func 'fact'*'n': bignum* -> bignum {
-    var:bignum 'zero' = (0);
-    var:bignum 'one' = (1);
-    if (ref:var:bignum 'n') <= (ref:var:bignum 'zero') {
+    if (ref:var:bignum 'n') <= (0) {
         return (1);
     } else {
-        return (ref:var:bignum 'n') x ref:func 'fact'*(ref:var:bignum 'n') - (ref:var:bignum 'one')*;
+        return (ref:var:bignum 'n') x ref:func 'fact'*(ref:var:bignum 'n') - (1)*;
     }
 }
 

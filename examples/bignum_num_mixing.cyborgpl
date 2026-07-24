@@ -1,0 +1,14 @@
+START
+
+var:bignum 'n' = (10);
+
+print*"n - 1 = " (ref:var:bignum 'n') - (1)*;
+print*"1 - n = " (1) - (ref:var:bignum 'n')*;
+print*"n <= 20 = " (ref:var:bignum 'n') <= (20)*;
+print*"n x 2 = " (ref:var:bignum 'n') x (2)*;
+print*"n / 4 = " (ref:var:bignum 'n') / (4)*;
+
+var:numw 'w' = '5 thousand';
+print*"n + w = " (ref:var:bignum 'n') + (ref:var:numw 'w')*;
+
+END

@@ -856,6 +856,29 @@ impl<'ctx> Codegen<'ctx> {
                 // Two nums of different precisions can't be combined by an
                 // LLVM op directly -- widen the narrower one to match first.
                 let (l, r) = self.match_float_widths(l, r);
+                // Mixing a bignum with a plain num/literal: promote the
+                // float side to a fresh bignum (at the default precision,
+                // same simplification already accepted for bignum-bignum
+                // ops not widening to a larger operand's precision) so
+                // every bignum arm below only ever has to handle
+                // bignum-vs-bignum. The promoted value is a genuine new
+                // temporary nothing else references, so it's registered
+                // for the enclosing statement to free like any other.
+                let (l, r) = match (l, r) {
+                    (BasicValueEnum::StructValue(_), BasicValueEnum::FloatValue(f)) => {
+                        let coerced = self.coerce_to_bignum(f.into(), DEFAULT_BIGNUM_PRECISION);
+                        let ptr = self.unwrap_bignum_ptr(coerced);
+                        self.bignum_temps.push((ptr, coerced));
+                        (l, coerced)
+                    }
+                    (BasicValueEnum::FloatValue(f), BasicValueEnum::StructValue(_)) => {
+                        let coerced = self.coerce_to_bignum(f.into(), DEFAULT_BIGNUM_PRECISION);
+                        let ptr = self.unwrap_bignum_ptr(coerced);
+                        self.bignum_temps.push((ptr, coerced));
+                        (coerced, r)
+                    }
+                    other => other,
+                };
 
                 match (l, r) {
                     (BasicValueEnum::FloatValue(lf), BasicValueEnum::FloatValue(rf)) => match op {
