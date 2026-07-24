@@ -1,19 +1,19 @@
 START
 
 var:numw 'apples' = '1 million';
-print*"apples = " ((ref:var:numw 'apples'))*;
+print*"apples = " (ref:var:numw 'apples')*;
 
 var:numw 'debt' = '-2.5 billion';
-print*"debt = " ((ref:var:numw 'debt'))*;
+print*"debt = " (ref:var:numw 'debt')*;
 
 var:numw 'plain' = '500';
-print*"plain (no magnitude word) = " ((ref:var:numw 'plain'))*;
+print*"plain (no magnitude word) = " (ref:var:numw 'plain')*;
 
 ref:var:numw 'apples' = '2 million';
-print*"apples reassigned = " ((ref:var:numw 'apples'))*;
-print*"apples + 1 = " ((ref:var:numw 'apples') + (1))*;
+print*"apples reassigned = " (ref:var:numw 'apples')*;
+print*"apples + 1 = " (ref:var:numw 'apples') + (1)*;
 
 var:numw 'small' = '5 thousand' [precision:16];
-print*"5 thousand at 16-bit = " ((ref:var:numw[precision:16] 'small'))*;
+print*"5 thousand at 16-bit = " (ref:var:numw[precision:16] 'small')*;
 
 END

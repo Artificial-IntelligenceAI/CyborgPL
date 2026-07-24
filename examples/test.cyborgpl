@@ -5,24 +5,24 @@ var:num 'apples' = (74);
 var:str 'apples' = ("a fruit");
 var:bool 'apples' = (true);
 var:bool 'great_language???' = (true);
-print*"Hell/no/7489/988384\"wsp\"D::fmkdjf{🫪}😂😈 " ((ref:var:num 'apples')) " 🦅🫆" ((ref:var:str 'emoji-store😂'))*;
-print*((ref:var:bool 'great_language???'))*;
-print*"apples as num: " ((ref:var:num 'apples')) ", as str: " ((ref:var:str 'apples')) ", as bool: " ((ref:var:bool 'apples'))*;
+print*"Hell/no/7489/988384\"wsp\"D::fmkdjf{🫪}😂😈 " (ref:var:num 'apples') " 🦅🫆" (ref:var:str 'emoji-store😂')*;
+print*(ref:var:bool 'great_language???')*;
+print*"apples as num: " (ref:var:num 'apples') ", as str: " (ref:var:str 'apples') ", as bool: " (ref:var:bool 'apples')*;
 
 var:num 'pi16' = (3.14159265358979) [precision:16];
 var:num 'pi32' = (3.14159265358979) [precision:32];
 var:num 'pi64' = (3.14159265358979);
 var:num 'pi128' = (3.14159265358979) [precision:128];
-print*"pi at 16-bit: " ((ref:var:num[precision:16] 'pi16')) ", 32-bit: " ((ref:var:num[precision:32] 'pi32')) ", 64-bit: " ((ref:var:num 'pi64')) ", 128-bit: " ((ref:var:num[precision:128] 'pi128'))*;
-print*"mixed-precision add (16+64): " ((ref:var:num[precision:16] 'pi16') + (ref:var:num 'pi64'))*;
-print*"128-bit arithmetic: " ((ref:var:num[precision:128] 'pi128') x (ref:var:num[precision:128] 'pi128'))*;
+print*"pi at 16-bit: " (ref:var:num[precision:16] 'pi16') ", 32-bit: " (ref:var:num[precision:32] 'pi32') ", 64-bit: " (ref:var:num 'pi64') ", 128-bit: " (ref:var:num[precision:128] 'pi128')*;
+print*"mixed-precision add (16+64): " (ref:var:num[precision:16] 'pi16') + (ref:var:num 'pi64')*;
+print*"128-bit arithmetic: " (ref:var:num[precision:128] 'pi128') x (ref:var:num[precision:128] 'pi128')*;
 
 var:bignum 'apples' = ("999999999999999999999999999999999999999");
-print*"apples as bignum: " ((ref:var:bignum 'apples'))*;
+print*"apples as bignum: " (ref:var:bignum 'apples')*;
 var:bignum 'pi_big' = ("3.14159265358979323846264338327950288419716939937510582097494459230781640628620899862803482534211706798214808651328230664709384460955058223172535940812848111745028410270193852110555964462294895493038196");
-print*"pi as bignum: " ((ref:var:bignum 'pi_big'))*;
+print*"pi as bignum: " (ref:var:bignum 'pi_big')*;
 var:bignum 'two' = (2);
 var:bignum 'three' = (3);
-print*"2/3 as bignum: " ((ref:var:bignum 'two') / (ref:var:bignum 'three'))*;
+print*"2/3 as bignum: " (ref:var:bignum 'two') / (ref:var:bignum 'three')*;
 
 END

@@ -237,16 +237,22 @@ impl Parser {
                             self.advance();
                             segments.push(PrintSegment::Str(s));
                         }
-                        Token::LParen => {
-                            self.advance();
+                        // A computed segment is recognized just by seeing
+                        // the start of an expression -- every value now
+                        // begins with its own required '(' wrap, or a
+                        // function call begins with a quoted name, either
+                        // of which is already enough to tell it apart from
+                        // a literal Str segment. No separate print-specific
+                        // marker needed anymore now that the general value
+                        // grammar itself always starts unambiguously.
+                        Token::LParen | Token::Quoted(_) => {
                             let value = self.parse_expr()?;
-                            self.expect(Token::RParen)?;
                             segments.push(PrintSegment::Expr(value));
                         }
                         Token::Star => break,
                         other => {
                             return Err(format!(
-                                "line {}: expected a \"literal\", a (parenthesized value), or the closing '*', found {:?}",
+                                "line {}: expected a \"literal\", a value, or the closing '*', found {:?}",
                                 self.tokens[self.pos].line, other
                             ));
                         }
