@@ -311,7 +311,20 @@ impl Parser {
     // Expression parsing, lowest to highest precedence:
     // or -> and -> equality -> comparison -> term -> factor -> power -> unary -> primary
     fn parse_expr(&mut self) -> PResult<Expr> {
-        self.parse_or()
+        self.parse_concat()
+    }
+
+    /// `stch` ("stitch"): text concatenation, the loosest-binding operator
+    /// of all -- `("a") stch (1) + (2)` means `("a") stch ((1) + (2))`.
+    /// Left-associative/chainable like every other binary level here.
+    fn parse_concat(&mut self) -> PResult<Expr> {
+        let mut left = self.parse_or()?;
+        while self.check(&Token::Stch) {
+            self.advance();
+            let right = self.parse_or()?;
+            left = Expr::Binary(Box::new(left), BinOp::Concat, Box::new(right));
+        }
+        Ok(left)
     }
 
     fn parse_or(&mut self) -> PResult<Expr> {

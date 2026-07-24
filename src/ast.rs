@@ -43,6 +43,10 @@ pub enum BinOp {
     Ge,
     And,
     Or,
+    /// `stch` ("stitch"): text concatenation. Auto-converts a non-`str`
+    /// operand to the same display text `print` would give it. Always
+    /// produces a fresh, independently-owned `str` value.
+    Concat,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

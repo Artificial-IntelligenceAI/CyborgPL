@@ -38,6 +38,8 @@ pub enum Token {
     Pow,
     /// `xxx`: tetration (repeated exponentiation).
     Tetration,
+    /// `stch` ("stitch"): text concatenation.
+    Stch,
 
     // Symbols
     LParen,
@@ -96,6 +98,7 @@ impl Token {
             "x" => Some(Token::Mul),
             "xx" => Some(Token::Pow),
             "xxx" => Some(Token::Tetration),
+            "stch" => Some(Token::Stch),
             _ => None,
         }
     }

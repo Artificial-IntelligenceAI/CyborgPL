@@ -91,14 +91,31 @@ pub struct Codegen<'ctx> {
     /// against that original produced value, not a freshly re-extracted
     /// pointer, or the comparison never matches).
     bignum_temps: Vec<(PointerValue<'ctx>, BasicValueEnum<'ctx>)>,
+    /// `str` values produced by `stch` or a str-returning call, not yet
+    /// adopted by a variable/return -- simpler than `bignum_temps` since
+    /// `str` is a bare pointer already (no struct-wrapping identity concern).
+    /// Drained and freed the same way, at the end of the statement that
+    /// produced them (or earlier, by `Stmt::Return`, once superseded by its
+    /// own always-fresh copy).
+    str_temps: Vec<PointerValue<'ctx>>,
     printf_fn: FunctionValue<'ctx>,
     /// libm's `pow`, backing both `xx` (power) and `xxx` (tetration).
     pow_fn: FunctionValue<'ctx>,
-    /// libc's `free` -- used specifically for `bignum_to_string`'s
-    /// returned buffer (a plain malloc'd C string, GMP's default
-    /// allocator), never for an actual bignum handle (that's `bignum.free`,
+    /// libc's `free` -- used for `bignum_to_string`'s returned buffer, and
+    /// now any owned `str` buffer (a variable's strdup'd copy, or a `stch`
+    /// result) -- never for an actual bignum handle (that's `bignum.free`,
     /// which also runs `mpf_clear` first).
     libc_free: FunctionValue<'ctx>,
+    /// libc's `malloc`/`snprintf`, backing `stch`'s two-pass "measure, then
+    /// fill" string build. libc's `strdup`, giving every `str` *stored*
+    /// somewhere (a variable, a return, a call argument) its own
+    /// independent heap copy -- the same "always copy on store" rule
+    /// `bignum` already follows -- so a `str` variable's buffer can always
+    /// be freed unconditionally at scope exit, with no need to track
+    /// whether it started life as a literal or a `stch` result.
+    malloc_fn: FunctionValue<'ctx>,
+    snprintf_fn: FunctionValue<'ctx>,
+    strdup_fn: FunctionValue<'ctx>,
     bignum: BignumFns<'ctx>,
 }
 
@@ -119,6 +136,16 @@ impl<'ctx> Codegen<'ctx> {
 
         let free_type = context.void_type().fn_type(&[i8_ptr.into()], false);
         let libc_free = module.add_function("free", free_type, Some(Linkage::External));
+
+        let i64_type = context.i64_type();
+        let malloc_type = i8_ptr.fn_type(&[i64_type.into()], false);
+        let malloc_fn = module.add_function("malloc", malloc_type, Some(Linkage::External));
+
+        let snprintf_type = context.i32_type().fn_type(&[i8_ptr.into(), i64_type.into(), i8_ptr.into()], true);
+        let snprintf_fn = module.add_function("snprintf", snprintf_type, Some(Linkage::External));
+
+        let strdup_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
+        let strdup_fn = module.add_function("strdup", strdup_type, Some(Linkage::External));
 
         // runtime/gmp/bignum_shim.c -- every handle is an opaque i8_ptr, so
         // these signatures are the same shape regardless of what GMP itself
@@ -204,9 +231,13 @@ impl<'ctx> Codegen<'ctx> {
             variables: HashMap::new(),
             scopes: Vec::new(),
             bignum_temps: Vec::new(),
+            str_temps: Vec::new(),
             printf_fn,
             pow_fn,
             libc_free,
+            malloc_fn,
+            snprintf_fn,
+            strdup_fn,
             bignum,
         }
     }
@@ -360,12 +391,25 @@ impl<'ctx> Codegen<'ctx> {
     }
 
     /// If a value being stored/passed doesn't match the target num
-    /// precision, converts it. No-op for bool/str.
+    /// precision, converts it. No-op for bool. A `str` being stored
+    /// anywhere (variable, return, call argument) always gets its own
+    /// fresh `strdup`'d copy -- same "always an independent copy on store"
+    /// rule `bignum` already follows -- so a `str` variable's buffer can
+    /// always be freed unconditionally at scope exit without having to
+    /// track whether it started out as a literal (never to be freed) or a
+    /// `stch` result (already heap-owned).
     fn coerce_to_type(&self, value: BasicValueEnum<'ctx>, ty: Type) -> BasicValueEnum<'ctx> {
         match (value, ty) {
             (BasicValueEnum::FloatValue(f), Type::Num(width)) => self.coerce_float(f, width).into(),
             (BasicValueEnum::FloatValue(f), Type::NumW(width)) => self.coerce_float(f, width).into(),
             (_, Type::BigNum(precision)) => self.coerce_to_bignum(value, precision),
+            (BasicValueEnum::PointerValue(p), Type::Str) => self
+                .builder
+                .build_call(self.strdup_fn, &[p.into()], "str_own_call")
+                .unwrap()
+                .try_as_basic_value()
+                .basic()
+                .unwrap(),
             _ => value,
         }
     }
@@ -419,8 +463,7 @@ impl<'ctx> Codegen<'ctx> {
     /// name/type twice in one block is just a rebind, not new shadowing --
     /// the original scope entry already remembers what to restore).
     fn declare_scoped(&mut self, key: (String, Type)) {
-        let frame = self.scopes.last().expect("declare_scoped called outside any block");
-        if frame.iter().any(|e| e.key() == &key) {
+        if self.declared_in_current_scope(&key) {
             return;
         }
         let entry = match self.variables.get(&key) {
@@ -428,6 +471,24 @@ impl<'ctx> Codegen<'ctx> {
             None => ScopeEntry::New(key),
         };
         self.scopes.last_mut().unwrap().push(entry);
+    }
+
+    /// Whether `key` was already declared in the *current* (innermost)
+    /// block -- as opposed to merely existing via an outer block's
+    /// binding, which `declare_scoped` shadows rather than reuses. Only a
+    /// true same-block redeclaration should free its old value before
+    /// being replaced; freeing on a fresh shadow would destroy a value the
+    /// outer block still owns and expects to find intact once this block
+    /// ends (a real bug this fixed: shadowing a `bignum`/`str` name used
+    /// to free the *outer* variable immediately, leaving it dangling for
+    /// the rest of the outer block and double-freed at its own scope
+    /// exit).
+    fn declared_in_current_scope(&self, key: &(String, Type)) -> bool {
+        self.scopes
+            .last()
+            .expect("declared_in_current_scope called outside any block")
+            .iter()
+            .any(|e| e.key() == key)
     }
 
     /// Frees the bignum handle currently stored in `key`'s variable slot.
@@ -443,6 +504,16 @@ impl<'ctx> Codegen<'ctx> {
         self.builder.build_call(self.bignum.free, &[ptr.into()], "bignum_free_call").unwrap();
     }
 
+    /// Frees the `str` buffer currently stored in `key`'s variable slot.
+    /// Always safe to call unconditionally: every `str` variable's stored
+    /// pointer is always its own `strdup`'d copy (see `coerce_to_type`),
+    /// never a bare literal's rodata pointer.
+    fn free_str_var(&mut self, key: &(String, Type)) {
+        let (ptr, llvm_ty) = *self.variables.get(key).expect("free_str_var on unknown variable");
+        let loaded = self.builder.build_load(llvm_ty, ptr, "str_for_free").unwrap().into_pointer_value();
+        self.builder.build_call(self.libc_free, &[loaded.into()], "str_free_call").unwrap();
+    }
+
     /// Ends the innermost block scope: every bignum it owns is freed (skip
     /// this only when the block already ended in `return`, since Return
     /// frees everything itself before the terminator -- freeing again
@@ -455,8 +526,10 @@ impl<'ctx> Codegen<'ctx> {
         let entries = self.scopes.pop().expect("pop_scope with no open scope");
         for entry in entries.into_iter().rev() {
             if emit_frees {
-                if let (_, Type::BigNum(_)) = entry.key() {
-                    self.free_bignum_var(entry.key());
+                match entry.key() {
+                    (_, Type::BigNum(_)) => self.free_bignum_var(entry.key()),
+                    (_, Type::Str) => self.free_str_var(entry.key()),
+                    _ => {}
                 }
             }
             match entry {
@@ -617,11 +690,19 @@ impl<'ctx> Codegen<'ctx> {
                 let value = self.compile_and_coerce(expr, *ty)?;
                 let key = (name.clone(), *ty);
 
-                // Re-declaring a bignum name that's already alive (same
-                // block, or shadowing an outer one) would otherwise leak
-                // its old handle -- free it before the slot's replaced.
-                if let (Type::BigNum(_), Some(_)) = (*ty, self.variables.get(&key)) {
-                    self.free_bignum_var(&key);
+                // Re-declaring a bignum/str name already declared in *this
+                // exact block* would otherwise leak its old handle -- free
+                // it before the slot's replaced. Must NOT fire when this is
+                // actually a fresh shadow of an outer block's variable
+                // (checked via declared_in_current_scope, not just
+                // self.variables) -- the outer one is still alive and
+                // owned by its own block.
+                if self.declared_in_current_scope(&key) {
+                    match *ty {
+                        Type::BigNum(_) => self.free_bignum_var(&key),
+                        Type::Str => self.free_str_var(&key),
+                        _ => {}
+                    }
                 }
 
                 let llvm_ty = self.basic_type(*ty);
@@ -638,11 +719,13 @@ impl<'ctx> Codegen<'ctx> {
                     .get(&key)
                     .ok_or_else(|| format!("undefined variable '{name}' of type {ty:?}"))?;
                 // Reassignment always stores a fresh handle (coerce_to_type
-                // -> coerce_to_bignum), so the old one must be freed here
-                // or it leaks -- the slot itself doesn't change, only what
-                // it points at.
-                if let Type::BigNum(_) = *ty {
-                    self.free_bignum_var(&key);
+                // -> coerce_to_bignum/strdup), so the old one must be freed
+                // here or it leaks -- the slot itself doesn't change, only
+                // what it points at.
+                match *ty {
+                    Type::BigNum(_) => self.free_bignum_var(&key),
+                    Type::Str => self.free_str_var(&key),
+                    _ => {}
                 }
                 self.builder.build_store(ptr, value).unwrap();
             }
@@ -669,6 +752,15 @@ impl<'ctx> Codegen<'ctx> {
                 for (ptr, _) in temps {
                     self.free_bignum_ptr(ptr);
                 }
+                // Same reasoning as bignum_temps above: coerce_to_type
+                // always strdup's a str return value, so any str_temps
+                // registered while evaluating it (a stch result, a nested
+                // call's own str return) are safely superseded and can be
+                // freed unconditionally here too.
+                let str_temps: Vec<PointerValue<'ctx>> = self.str_temps.drain(..).collect();
+                for ptr in str_temps {
+                    self.builder.build_call(self.libc_free, &[ptr.into()], "str_temp_free_call").unwrap();
+                }
                 // A `return` exits every block it's nested in at once, so
                 // every currently-open scope must be freed here -- not
                 // just the innermost. This only frees; it deliberately
@@ -682,11 +774,15 @@ impl<'ctx> Codegen<'ctx> {
                     .rev()
                     .flat_map(|frame| frame.iter().rev())
                     .map(ScopeEntry::key)
-                    .filter(|key| matches!(key.1, Type::BigNum(_)))
+                    .filter(|key| matches!(key.1, Type::BigNum(_) | Type::Str))
                     .cloned()
                     .collect();
                 for key in &to_free {
-                    self.free_bignum_var(key);
+                    match key.1 {
+                        Type::BigNum(_) => self.free_bignum_var(key),
+                        Type::Str => self.free_str_var(key),
+                        _ => unreachable!(),
+                    }
                 }
                 match coerced {
                     Some(value) => {
@@ -808,8 +904,13 @@ impl<'ctx> Codegen<'ctx> {
             for (ptr, _) in temps {
                 self.free_bignum_ptr(ptr);
             }
+            let str_temps: Vec<PointerValue<'ctx>> = self.str_temps.drain(..).collect();
+            for ptr in str_temps {
+                self.builder.build_call(self.libc_free, &[ptr.into()], "str_temp_free_call").unwrap();
+            }
         } else {
             self.bignum_temps.clear();
+            self.str_temps.clear();
         }
         Ok(())
     }
@@ -867,6 +968,15 @@ impl<'ctx> Codegen<'ctx> {
             Expr::Binary(lhs, op, rhs) => {
                 let l = self.compile_expr(lhs)?;
                 let r = self.compile_expr(rhs)?;
+                // `stch` accepts any shape on either side (auto-converting
+                // to display text the same way print does) and never
+                // widens/promotes its operands -- handle it before any of
+                // the numeric-specific matching below, which doesn't apply.
+                if *op == BinOp::Concat {
+                    let ptr = self.compile_concat(l, r);
+                    self.str_temps.push(ptr);
+                    return Ok(ptr.into());
+                }
                 // Two nums of different precisions can't be combined by an
                 // LLVM op directly -- widen the narrower one to match first.
                 let (l, r) = self.match_float_widths(l, r);
@@ -947,6 +1057,7 @@ impl<'ctx> Codegen<'ctx> {
                             .unwrap()
                             .into(),
                         BinOp::And | BinOp::Or => panic!("{op:?} requires bool operands, not num"),
+                        BinOp::Concat => unreachable!("Concat is handled earlier, before this match"),
                     },
                     (BasicValueEnum::IntValue(li), BasicValueEnum::IntValue(ri)) => match op {
                         BinOp::Eq => self.builder.build_int_compare(IntPredicate::EQ, li, ri, "eq").unwrap().into(),
@@ -1066,6 +1177,9 @@ impl<'ctx> Codegen<'ctx> {
             let ptr = self.unwrap_bignum_ptr(result);
             self.bignum_temps.push((ptr, result));
         }
+        if let (Type::Str, Some(result)) = (return_type, result) {
+            self.str_temps.push(result.into_pointer_value());
+        }
         Ok(result)
     }
 
@@ -1112,6 +1226,68 @@ impl<'ctx> Codegen<'ctx> {
             }
             other => panic!("unsupported value for text formatting: {other:?}"),
         }
+    }
+
+    /// `stch`: builds a brand-new, independently-owned `str` from two
+    /// values of any shape, reusing `value_fmt`'s exact per-value
+    /// formatting (so a non-str operand displays identically to how
+    /// `print` would show it). A real two-pass `snprintf` -- first with a
+    /// null buffer to measure the exact length, then again into a
+    /// freshly `malloc`'d buffer of that size -- rather than a fixed-size
+    /// guess, so there's no truncation risk the way the old (removed)
+    /// `stch` implementation had.
+    fn compile_concat(&mut self, l: BasicValueEnum<'ctx>, r: BasicValueEnum<'ctx>) -> PointerValue<'ctx> {
+        let (frag_l, arg_l, free_l) = self.value_fmt(l);
+        let (frag_r, arg_r, free_r) = self.value_fmt(r);
+        let fmt = format!("{frag_l}{frag_r}");
+        let fmt_ptr = self.builder.build_global_string_ptr(&fmt, "stch_fmt").unwrap().as_pointer_value();
+
+        let i8_ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let i64_ty = self.context.i64_type();
+        let null_buf = i8_ptr_ty.const_null();
+        let zero_size = i64_ty.const_int(0, false);
+
+        let len = self
+            .builder
+            .build_call(
+                self.snprintf_fn,
+                &[null_buf.into(), zero_size.into(), fmt_ptr.into(), arg_l, arg_r],
+                "stch_size_call",
+            )
+            .unwrap()
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_int_value();
+        let len64 = self.builder.build_int_z_extend(len, i64_ty, "stch_len64").unwrap();
+        let buf_size = self.builder.build_int_add(len64, i64_ty.const_int(1, false), "stch_buf_size").unwrap();
+        let buffer = self
+            .builder
+            .build_call(self.malloc_fn, &[buf_size.into()], "stch_malloc_call")
+            .unwrap()
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_pointer_value();
+
+        self.builder
+            .build_call(
+                self.snprintf_fn,
+                &[buffer.into(), buf_size.into(), fmt_ptr.into(), arg_l, arg_r],
+                "stch_fill_call",
+            )
+            .unwrap();
+
+        // Only after both values have actually been formatted into the
+        // combined buffer: each operand's own formatted-string buffer (only
+        // present for a bignum operand -- see value_fmt) is a separate
+        // malloc'd string nothing else references once this call is done
+        // reading from it.
+        for ptr in [free_l, free_r].into_iter().flatten() {
+            self.builder.build_call(self.libc_free, &[ptr.into()], "stch_operand_fmt_free_call").unwrap();
+        }
+
+        buffer
     }
 
     /// `xxx`: a xxx b = a ^ (a ^ (a ^ ... )) with `b` copies of `a`. `b` is

@@ -1,0 +1,25 @@
+func 'greet'*'name': str* -> str {
+    return (ref:var:str 'name') stch (", welcome!");
+}
+
+START
+
+var:str 'a' = ("hello");
+var:str 'b' = ("world");
+print*"concat: " (ref:var:str 'a') stch (" ") stch (ref:var:str 'b')*;
+
+print*"auto-convert num: " ("count is ") stch (42)*;
+print*"auto-convert bool: " ("flag is ") stch (true)*;
+
+var:str 'greeting' = ref:func 'greet'*("Ada")*;
+print*"func result: " (ref:var:str 'greeting')*;
+
+var:str 'acc' = ("");
+var:num 'i' = (0);
+while (ref:var:num 'i') < (5) {
+    ref:var:str 'acc' = (ref:var:str 'acc') stch (ref:var:num 'i') stch (",");
+    ref:var:num 'i' = (ref:var:num 'i') + (1);
+}
+print*"looped concat: " (ref:var:str 'acc')*;
+
+END

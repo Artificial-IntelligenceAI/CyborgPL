@@ -6,12 +6,12 @@ A running note of things that have come up as likely next steps or known gaps wh
 
 - Enforcing `ref:var:TYPE`'s stated type against the actual declaration — right now it's informational only ("clarity, for now"), since no real type checker exists yet.
 - Higher hyperoperator levels beyond `xxx` (tetration), if ever wanted.
-- Whether real lexical block scoping (added for automatic bignum cleanup) should extend further — e.g. shadowing edge cases, function-parameter scoping.
+- Whether real lexical block scoping (added for automatic bignum/str cleanup) should extend further.
 - `numw`'s magnitude-word vocabulary is currently a fixed list (thousand/million/billion/trillion/quadrillion/quintillion) and only accepts one word after the number — no compound number words (`'one hundred thousand'`) and no expanding the list without a design decision.
 
 ## Known implementation gaps
 
-- `str` is always a compile-time global constant — there's no runtime string construction or concatenation yet. This is also why `str` needs no memory management at all (nothing is ever heap-allocated for it), unlike `bignum`.
+- `str` now has runtime construction via `stch` and real memory management (every `str` in a variable is its own `strdup`'d copy, freed at scope exit/reassignment/return, mirroring `bignum`). One accepted inefficiency: a value stored somewhere always gets its own fresh copy even when the source was already an unshared temporary (a `stch` result, a str-returning call) — a redundant extra copy in that case, same simplification already accepted for `bignum`.
 - Intermediate bignum binary-op results always compute at the default precision (256 bits) regardless of operand precision, unlike `num`'s "widen to the larger operand" behavior.
 - No LLVM optimization passes run on generated code (`mem2reg`, inlining, etc.) — deliberately deprioritized until the language's basics are finished.
 
