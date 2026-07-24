@@ -20,5 +20,6 @@ A running note of things that have come up as likely next steps or known gaps wh
 
 - A real type checker — would also unlock actually enforcing `ref:var:TYPE`.
 - True arbitrary precision beyond what GMP's `mpf_t` offers, or a fixed-width 256-bit float type — discussed as a much larger undertaking, unstarted.
+- Persistent storage (writing to / reading from a file) — right now `input:`/`print` cover stdin/stdout only; nothing a program does outlives the process. Would need its own syntax (maybe a `write:`/`read:file` pair, parallel to `input:`) and its own design conversation.
 
 Nothing here is a promise. It's context for whoever — human or AI — picks this project up next.
