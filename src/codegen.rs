@@ -104,6 +104,25 @@ pub struct Codegen<'ctx> {
     /// produced them (or earlier, by `Stmt::Return`, once superseded by its
     /// own always-fresh copy).
     str_temps: Vec<PointerValue<'ctx>>,
+    /// One frame per `while` loop currently being compiled (innermost
+    /// last), each mapping a bare literal's exact value (`f64::to_bits`,
+    /// since `f64` isn't `Hash`/`Eq`) and the bignum precision it's paired
+    /// with to the synthetic scoped variable holding its *already
+    /// constructed* handle. Populated by `Stmt::While`'s own codegen
+    /// (`find_hoistable_bignum_literals`) right before the loop, so a
+    /// literal combined with a bignum inside the loop body -- e.g.
+    /// `acc + (1)` -- doesn't otherwise pay for a fresh `bignum_new` +
+    /// `set_d` (a real GMP malloc) on every single iteration: GMP calls
+    /// aren't pure, so LLVM's own optimizer never hoists this for us.
+    /// Each frame is scoped exactly like a block's own local variables
+    /// (pushed/popped alongside a dedicated `scopes` frame), so an early
+    /// `return` from inside the loop still frees it correctly via
+    /// `Stmt::Return`'s existing "free every open scope" pass.
+    hoisted_bignum_literals: Vec<HashMap<(u64, u32), (String, Type)>>,
+    /// Source of unique names for hoisted-literal synthetic variables --
+    /// never seen or written by any CyborgPL program, just needs to never
+    /// collide with another hoist or with itself across loops.
+    next_hoisted_lit_id: u32,
     printf_fn: FunctionValue<'ctx>,
     /// libm's `pow`, backing both `xx` (power) and `xxx` (tetration).
     pow_fn: FunctionValue<'ctx>,
@@ -344,6 +363,8 @@ impl<'ctx> Codegen<'ctx> {
             scopes: Vec::new(),
             bignum_temps: Vec::new(),
             str_temps: Vec::new(),
+            hoisted_bignum_literals: Vec::new(),
+            next_hoisted_lit_id: 0,
             printf_fn,
             pow_fn,
             libc_free,
@@ -530,6 +551,108 @@ impl<'ctx> Codegen<'ctx> {
                 }
             }
             _ => None,
+        }
+    }
+
+    /// Scans every statement `block` directly contains -- recursing into
+    /// `If`'s own branches, but never into a nested `While`'s condition or
+    /// body -- for every point where `compile_expr`'s `Expr::Binary`
+    /// literal-pairing dispatch would otherwise construct a fresh bignum
+    /// handle (a real GMP malloc) for a bare literal on every single
+    /// evaluation. A nested loop hoists independently, scoped to its own
+    /// preheader, once `compile_stmt` actually reaches it -- recursing
+    /// into it here would hoist its literals to the *wrong* (outer)
+    /// scope, freed too late relative to the inner loop that actually
+    /// uses them. Returns each literal's raw value (as `f64::to_bits`,
+    /// since `f64` isn't `Hash`/`Eq`) paired with the bignum precision it
+    /// would be built at.
+    fn find_hoistable_bignum_literals(&self, block: &Block, out: &mut Vec<(u64, u32)>) {
+        for stmt in block {
+            match stmt {
+                Stmt::VarDecl(_, _, e) | Stmt::Assign(_, _, e) | Stmt::ExprStmt(e) => {
+                    self.scan_expr_for_bignum_literals(e, out);
+                }
+                Stmt::ArrayIndexAssign(_, _, idx, val) => {
+                    self.scan_expr_for_bignum_literals(idx, out);
+                    self.scan_expr_for_bignum_literals(val, out);
+                }
+                Stmt::Append(arr, val) => {
+                    self.scan_expr_for_bignum_literals(arr, out);
+                    self.scan_expr_for_bignum_literals(val, out);
+                }
+                Stmt::Return(Some(e)) => self.scan_expr_for_bignum_literals(e, out),
+                Stmt::Return(None) | Stmt::Input(..) | Stmt::Clock(..) | Stmt::While(..) => {}
+                Stmt::Print(segments, dest) => {
+                    for seg in segments {
+                        if let PrintSegment::Expr(e) = seg {
+                            self.scan_expr_for_bignum_literals(e, out);
+                        }
+                    }
+                    if let Some(d) = dest {
+                        self.scan_expr_for_bignum_literals(d, out);
+                    }
+                }
+                Stmt::Overwrite(segments, dest) => {
+                    for seg in segments {
+                        if let PrintSegment::Expr(e) = seg {
+                            self.scan_expr_for_bignum_literals(e, out);
+                        }
+                    }
+                    self.scan_expr_for_bignum_literals(dest, out);
+                }
+                Stmt::If(cond, then_b, else_b) => {
+                    self.scan_expr_for_bignum_literals(cond, out);
+                    self.find_hoistable_bignum_literals(then_b, out);
+                    if let Some(eb) = else_b {
+                        self.find_hoistable_bignum_literals(eb, out);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Same literal-pairing shape `compile_expr`'s `Expr::Binary` arm
+    /// matches (mirrored exactly, including the "not also a literal on
+    /// the other side" guard) -- recurses through every other `Expr`
+    /// position so a literal nested arbitrarily deep still gets found.
+    fn scan_expr_for_bignum_literals(&self, expr: &Expr, out: &mut Vec<(u64, u32)>) {
+        match expr {
+            Expr::Binary(lhs, op, rhs) if *op != BinOp::Concat => match (lhs.as_ref(), rhs.as_ref()) {
+                (Expr::Num(n, _), other) if !matches!(other, Expr::Num(_, _)) => {
+                    if let Some(p) = self.bignum_precision_of_expr(other) {
+                        out.push((n.to_bits(), p));
+                    }
+                    self.scan_expr_for_bignum_literals(other, out);
+                }
+                (other, Expr::Num(n, _)) if !matches!(other, Expr::Num(_, _)) => {
+                    if let Some(p) = self.bignum_precision_of_expr(other) {
+                        out.push((n.to_bits(), p));
+                    }
+                    self.scan_expr_for_bignum_literals(other, out);
+                }
+                _ => {
+                    self.scan_expr_for_bignum_literals(lhs, out);
+                    self.scan_expr_for_bignum_literals(rhs, out);
+                }
+            },
+            Expr::Binary(lhs, _, rhs) => {
+                self.scan_expr_for_bignum_literals(lhs, out);
+                self.scan_expr_for_bignum_literals(rhs, out);
+            }
+            Expr::Unary(_, inner) => self.scan_expr_for_bignum_literals(inner, out),
+            Expr::Call(_, args) => {
+                for a in args {
+                    self.scan_expr_for_bignum_literals(a, out);
+                }
+            }
+            Expr::ArrayLiteral(elems) => {
+                for e in elems {
+                    self.scan_expr_for_bignum_literals(e, out);
+                }
+            }
+            Expr::ArrayIndex(_, _, idx) => self.scan_expr_for_bignum_literals(idx, out),
+            Expr::Length(e) => self.scan_expr_for_bignum_literals(e, out),
+            Expr::Num(_, _) | Expr::Bool(_) | Expr::Str(_) | Expr::Var(_, _) => {}
         }
     }
 
@@ -797,6 +920,37 @@ impl<'ctx> Codegen<'ctx> {
             }
         }
         self.context.f64_type().const_float(n).into()
+    }
+
+    /// Same job as `compile_literal_paired_with`, except when `other_expr`
+    /// is bignum-shaped and this exact literal was already hoisted out of
+    /// the enclosing loop (`Stmt::While`'s codegen, via
+    /// `find_hoistable_bignum_literals`): reuses that already-constructed
+    /// handle directly (a plain variable load) instead of paying for a
+    /// fresh `bignum_new` + `set_d` again. Checked from the innermost
+    /// active loop outward, though in practice a given literal occurrence
+    /// only ever has a hoisted entry in exactly one active frame -- each
+    /// loop's scan never descends into a *nested* loop's own body, so
+    /// there's no ambiguity about which frame it belongs to. Falls back to
+    /// the exact old behavior whenever nothing is hoisted for it (outside
+    /// any loop, or `other_expr` isn't bignum-shaped at all).
+    fn compile_hoisted_or_literal(
+        &self,
+        text: &str,
+        n: f64,
+        other_expr: &Expr,
+        other_value: &BasicValueEnum<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        if let Some(precision) = self.bignum_precision_of_expr(other_expr) {
+            let bits = n.to_bits();
+            for frame in self.hoisted_bignum_literals.iter().rev() {
+                if let Some(key) = frame.get(&(bits, precision)) {
+                    let (ptr, llvm_ty) = self.variables[key];
+                    return self.builder.build_load(llvm_ty, ptr, "hoisted_bignum_lit_load").unwrap();
+                }
+            }
+        }
+        self.compile_literal_paired_with(text, n, other_value)
     }
 
     /// Builds a fresh array from `{(v1), (v2), ...}`, appending each
@@ -1685,6 +1839,43 @@ impl<'ctx> Codegen<'ctx> {
                 let body_bb = self.context.append_basic_block(function, "while_body");
                 let merge_bb = self.context.append_basic_block(function, "while_end");
 
+                // Hoist any bare literal combined with a bignum anywhere in
+                // this loop (condition or body) so it's constructed once,
+                // right here, rather than on every iteration -- see
+                // `find_hoistable_bignum_literals`/`compile_hoisted_or_literal`.
+                // Scoped exactly like a block's own local variables (a
+                // dedicated `scopes` frame, pushed here and popped -- with
+                // frees -- once the loop is truly done), so an early
+                // `return` from inside the loop still frees it correctly
+                // via `Stmt::Return`'s existing "free every open scope"
+                // pass. Uses `entry_alloca` rather than a plain
+                // `build_alloca` here (this setup code can itself run
+                // repeatedly if this `while` is nested inside an outer
+                // loop) to avoid the same unbounded-dynamic-stack-growth
+                // bug `entry_alloca` was already introduced to fix
+                // elsewhere.
+                let mut literal_sites = Vec::new();
+                self.scan_expr_for_bignum_literals(cond, &mut literal_sites);
+                self.find_hoistable_bignum_literals(body, &mut literal_sites);
+                self.scopes.push(Vec::new());
+                let mut frame = HashMap::new();
+                for (bits, precision) in literal_sites {
+                    if frame.contains_key(&(bits, precision)) {
+                        continue;
+                    }
+                    let n = f64::from_bits(bits);
+                    let value = self.coerce_to_bignum(self.context.f64_type().const_float(n).into(), precision);
+                    let key = (format!("__hoisted_bignum_lit_{}", self.next_hoisted_lit_id), Type::BigNum(precision));
+                    self.next_hoisted_lit_id += 1;
+                    let llvm_ty = self.basic_type(key.1);
+                    let alloca = self.entry_alloca(llvm_ty, "hoisted_bignum_lit");
+                    self.builder.build_store(alloca, value).unwrap();
+                    self.declare_scoped(key.clone());
+                    self.variables.insert(key.clone(), (alloca, llvm_ty));
+                    frame.insert((bits, precision), key);
+                }
+                self.hoisted_bignum_literals.push(frame);
+
                 self.builder.build_unconditional_branch(cond_bb).unwrap();
 
                 self.builder.position_at_end(cond_bb);
@@ -1700,6 +1891,8 @@ impl<'ctx> Codegen<'ctx> {
                 }
 
                 self.builder.position_at_end(merge_bb);
+                self.hoisted_bignum_literals.pop();
+                self.pop_scope(true);
             }
         }
         // Free any bignum temporaries created while evaluating this
@@ -1804,12 +1997,12 @@ impl<'ctx> Codegen<'ctx> {
                 let (l, r) = match (lhs.as_ref(), rhs.as_ref()) {
                     (Expr::Num(n, text), other) if !matches!(other, Expr::Num(_, _)) => {
                         let r = self.compile_expr(rhs)?;
-                        let l = self.compile_literal_paired_with(text, *n, &r);
+                        let l = self.compile_hoisted_or_literal(text, *n, other, &r);
                         (l, r)
                     }
                     (other, Expr::Num(n, text)) if !matches!(other, Expr::Num(_, _)) => {
                         let l = self.compile_expr(lhs)?;
-                        let r = self.compile_literal_paired_with(text, *n, &l);
+                        let r = self.compile_hoisted_or_literal(text, *n, other, &l);
                         (l, r)
                     }
                     _ => (self.compile_expr(lhs)?, self.compile_expr(rhs)?),
