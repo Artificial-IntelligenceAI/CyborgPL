@@ -11,7 +11,6 @@ A running note of things that have come up as likely next steps or known gaps wh
 - Whether `clock:` should ever support absolute/wall-clock time (not just elapsed-since-start), or a `bignum`/higher-precision variant for very short spans — deliberately left out of the first version; right now it's `num` only.
 - Reading from a file — deliberately deferred; `print`/`overwrite` only write for now. Whatever syntax it gets should probably mirror `input:`'s shape (`input:type 'name' [from*(dest)*];`?), but that's undecided.
 - Whether file writing should ever support append (only overwrite exists now), or whether `[to*(dest)*]` should extend to any other destination beyond a file.
-- Whether `input:`/`clock:` should be renamed/reframed as `var:input:type`/`var:clock:type` (and read back via `ref:var:input:type`/`ref:var:clock:type`) to visually group them under the `var:` family — raised and set aside for now. The real snag: "came from input/clock" isn't part of a variable's *type* today (an `input:str` variable is just an ordinary `str` afterward, freely interchangeable, reassignable, passable anywhere a `str` is expected) — folding the source into the reference syntax would make it part of the type identity, raising real questions (can it still pass to a plain `str` parameter? does it keep the tag after being reassigned with a hand-written value?) that weren't resolved.
 
 ## Known implementation gaps
 
