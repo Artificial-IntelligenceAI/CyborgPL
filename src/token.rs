@@ -94,6 +94,11 @@ pub enum Token {
     GtEq,    // >=
     AndAnd,  // &&
     OrOr,    // ||
+    /// `>>`: a shorter alternative spelling for `ref:func` when calling a
+    /// function -- `>> 'name'*args*` instead of `ref:func 'name'*args*`.
+    /// Added alongside `ref:func`, not replacing it; both spellings stay
+    /// valid everywhere a call can appear.
+    Activate,
 
     Eof,
 }

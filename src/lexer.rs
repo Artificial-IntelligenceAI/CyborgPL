@@ -90,6 +90,9 @@ impl<'a> Lexer<'a> {
                 if self.peek_char() == Some('=') {
                     self.chars.next();
                     Token::GtEq
+                } else if self.peek_char() == Some('>') {
+                    self.chars.next();
+                    Token::Activate
                 } else {
                     Token::Gt
                 }

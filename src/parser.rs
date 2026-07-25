@@ -214,14 +214,15 @@ impl Parser {
                 // A computed segment is recognized just by seeing the
                 // start of an expression -- every value now begins with
                 // its own required '(' wrap, or a function call begins
-                // with `ref:func`, either of which is already enough to
-                // tell it apart from a literal Str segment. No separate
-                // print-specific marker needed anymore now that the
-                // general value grammar itself always starts
-                // unambiguously. A call fully consumes its own `*args*`
-                // before this loop checks for the closing `*` again, so
-                // there's no ambiguity between the two uses of `*`.
-                Token::LParen | Token::Ref | Token::Minus | Token::Not => {
+                // with `ref:func` (or its `>>` shorthand), either of which
+                // is already enough to tell it apart from a literal Str
+                // segment. No separate print-specific marker needed
+                // anymore now that the general value grammar itself
+                // always starts unambiguously. A call fully consumes its
+                // own `*args*` before this loop checks for the closing
+                // `*` again, so there's no ambiguity between the two uses
+                // of `*`.
+                Token::LParen | Token::Ref | Token::Minus | Token::Not | Token::Activate => {
                     let value = self.parse_expr()?;
                     segments.push(PrintSegment::Expr(value));
                 }
@@ -308,6 +309,13 @@ impl Parser {
             // parse_primary's own Ref handling.
             Token::Ref if self.tokens.get(self.pos + 2).map(|t| &t.token) == Some(&Token::Func) => {
                 let expr = self.parse_func_call()?;
+                self.expect(Token::Semicolon)?;
+                Ok(Stmt::ExprStmt(expr))
+            }
+            // `>> 'name'*args*;` -- the `>>` shorthand call, same
+            // statement-position handling as the `ref:func` form above.
+            Token::Activate => {
+                let expr = self.parse_short_func_call()?;
                 self.expect(Token::Semicolon)?;
                 Ok(Stmt::ExprStmt(expr))
             }
@@ -584,6 +592,9 @@ impl Parser {
             Token::Ref if self.tokens.get(self.pos + 2).map(|t| &t.token) == Some(&Token::Func) => {
                 self.parse_func_call()
             }
+            // `>> 'name'*args*` -- the `>>` shorthand call, exempt from
+            // the outer wrap requirement exactly like `ref:func` is.
+            Token::Activate => self.parse_short_func_call(),
             // `{(v1), (v2), ...}` -- an array literal, each element
             // individually wrapped like any other value. Exempt from
             // needing an extra outer `( )` wrap, same as a function call.
@@ -716,6 +727,7 @@ impl Parser {
             Token::Ref if self.tokens.get(self.pos + 2).map(|t| &t.token) == Some(&Token::Func) => {
                 self.parse_func_call()
             }
+            Token::Activate => self.parse_short_func_call(),
             Token::Ref => {
                 let (name, ty) = self.parse_ref_var()?;
                 Ok(Expr::Var(name, ty))
@@ -727,14 +739,33 @@ impl Parser {
         }
     }
 
-    /// Parses `ref:func 'name'*arg, arg, ...*` -- the only way to call a
-    /// function now. Exempt from the "every value needs its own `( )`"
-    /// rule, like every function call: it already has its own delimiters
-    /// (`*...*`, mirroring how `print*...*` brackets its own segments).
+    /// Parses `ref:func 'name'*arg, arg, ...*` -- the original way to call
+    /// a function; `>>` (`parse_short_func_call` below) is a shorter
+    /// alternative spelling added alongside it, not a replacement. Exempt
+    /// from the "every value needs its own `( )`" rule, like every
+    /// function call: it already has its own delimiters (`*...*`,
+    /// mirroring how `print*...*` brackets its own segments).
     fn parse_func_call(&mut self) -> PResult<Expr> {
         self.expect(Token::Ref)?;
         self.expect(Token::Colon)?;
         self.expect(Token::Func)?;
+        self.parse_call_name_and_args()
+    }
+
+    /// `>> 'name'*arg, arg, ...*` -- a shorter alternative spelling for
+    /// `ref:func 'name'*arg, arg, ...*`. Both spellings produce the exact
+    /// same `Expr::Call`, and both stay valid everywhere a call can
+    /// appear -- this is purely an added alias, `ref:func` isn't going
+    /// away.
+    fn parse_short_func_call(&mut self) -> PResult<Expr> {
+        self.expect(Token::Activate)?;
+        self.parse_call_name_and_args()
+    }
+
+    /// Parses `'name'*arg, arg, ...*` -- the part shared by both call
+    /// spellings above, once whichever prefix (`ref:func` or `>>`) has
+    /// already been consumed.
+    fn parse_call_name_and_args(&mut self) -> PResult<Expr> {
         let name = self.expect_quoted_ident()?;
         self.expect(Token::Star)?;
         let mut args = Vec::new();
