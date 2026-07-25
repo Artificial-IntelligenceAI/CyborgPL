@@ -1,0 +1,4 @@
+START
+var:int 'x' = (5000000000) x (5000000000);
+print*(ref:var:int 'x')*;
+END

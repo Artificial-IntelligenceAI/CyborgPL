@@ -12,21 +12,6 @@ use inkwell::{AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel};
 
 use crate::ast::*;
 
-/// Parses an `int` literal's original digit text directly, rather than
-/// going through the lexer's already-lossy `f64` (`n`, exact only up to
-/// 2^53) -- the same "read the original digits, not the lossy float"
-/// fix `bignum`'s own bare-literal case needed. Falls back to `n as i64`
-/// only when `text` doesn't parse as a bare integer (e.g. a redundant
-/// `"5.0"` -- the type checker has already confirmed the *value* is
-/// whole by this point, so the fallback is exact for any text shaped
-/// like that in practice). Doesn't handle the one literal that can't be
-/// written positively and negated (`i64::MIN`, whose positive form
-/// already exceeds `i64::MAX`) -- a narrow, known limitation shared with
-/// most C-like languages' own `INT_MIN` literal quirk.
-fn parse_int_literal(text: &str, n: f64) -> i64 {
-    text.parse::<i64>().unwrap_or(n as i64)
-}
-
 /// The GMP shim functions (runtime/gmp/bignum_shim.c) backing `bignum`.
 struct BignumFns<'ctx> {
     new: FunctionValue<'ctx>,

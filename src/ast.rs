@@ -100,6 +100,39 @@ pub const DEFAULT_NUM_PRECISION: u32 = 64;
 pub const DEFAULT_BIGNUM_PRECISION: u32 = 256;
 pub const DEFAULT_INT_PRECISION: u32 = 64;
 
+/// Parses an `int` literal's original digit text directly, rather than
+/// going through the lexer's already-lossy `f64` (`n`, exact only up to
+/// 2^53) -- the same "read the original digits, not the lossy float"
+/// fix `bignum`'s own bare-literal case needed. Falls back to `n as i64`
+/// only when `text` doesn't parse as a bare integer (e.g. a redundant
+/// `"5.0"` -- the type checker has already confirmed the *value* is
+/// whole by this point, so the fallback is exact for any text shaped
+/// like that in practice). Doesn't handle the one literal that can't be
+/// written positively and negated (`i64::MIN`, whose positive form
+/// already exceeds `i64::MAX`) -- a narrow, known limitation shared with
+/// most C-like languages' own `INT_MIN` literal quirk. Shared by
+/// codegen.rs (building the actual constant) and typecheck.rs (checking
+/// whether a literal fits its declared/paired width at compile time) --
+/// both need the exact same value, or the two could disagree about
+/// whether a given literal is valid.
+pub fn parse_int_literal(text: &str, n: f64) -> i64 {
+    text.parse::<i64>().unwrap_or(n as i64)
+}
+
+/// The signed range representable at each of `int`'s supported widths --
+/// shared by typecheck.rs (checking whether a compile-time-constant
+/// value fits) and mirrors exactly what codegen.rs's `coerce_int_width`
+/// checks at runtime for a value that isn't known until the program runs.
+pub fn int_range_for(width: u32) -> (i64, i64) {
+    match width {
+        8 => (i8::MIN as i64, i8::MAX as i64),
+        16 => (i16::MIN as i64, i16::MAX as i64),
+        32 => (i32::MIN as i64, i32::MAX as i64),
+        64 => (i64::MIN, i64::MAX),
+        other => panic!("unsupported int precision: {other} (the parser should have rejected this)"),
+    }
+}
+
 /// Renders a type the way it'd actually be written in CyborgPL source,
 /// for error messages -- `{:?}` (`Num(64)`) reads like Rust, not CyborgPL.
 impl std::fmt::Display for Type {

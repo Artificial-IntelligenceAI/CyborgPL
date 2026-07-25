@@ -13,6 +13,26 @@ use std::collections::HashMap;
 
 use crate::ast::*;
 
+/// The result of attempting to evaluate an expression as a compile-time
+/// `int` constant (see `TypeChecker::try_const_eval_int`). Deliberately
+/// not folded into a plain `Option<i64>` -- "not a constant at all" and
+/// "is a constant, but the computation overflows" need to stay distinct,
+/// or a caller checking a *result* against a target width couldn't tell
+/// "nothing to report" from "already overflowed further down, don't
+/// report a second, confusing error on top of it."
+enum ConstInt {
+    /// Contains something whose value isn't known until the program
+    /// runs (a variable, a function call, ...) -- nothing to check.
+    NotConstant,
+    /// Every operand *was* a compile-time constant, but the computation
+    /// itself doesn't fit in a 64-bit int (checked via Rust's own
+    /// checked arithmetic) -- mirrors the exact overflow codegen's
+    /// runtime `checked_int_arith` would also catch, just caught here
+    /// before the program ever runs instead of when it's executed.
+    Overflowed,
+    Value(i64),
+}
+
 /// The four runtime "shapes" a value can have in codegen (FloatValue,
 /// IntValue, PointerValue, StructValue) -- coercion and binary-op validity
 /// are actually decided by shape, not by the exact declared type (e.g. any
@@ -397,7 +417,10 @@ impl TypeChecker {
                     // magnitude category, so there's no reason to force a
                     // different one.
                     (UnOp::Neg, Type::BigNum(_)) => Some(ity),
-                    (UnOp::Neg, Type::Int(w)) => Some(Type::Int(w)),
+                    (UnOp::Neg, Type::Int(w)) => {
+                        self.check_int_const_overflow(expr, w);
+                        Some(Type::Int(w))
+                    }
                     (UnOp::Not, Type::Bool) => Some(Type::Bool),
                     // Forced to a fixed result type/width regardless of the
                     // operand's own precision -- matches compile_factorial
@@ -408,7 +431,10 @@ impl TypeChecker {
                     // overflowing/losing precision.
                     (UnOp::Factorial, Type::Num(_) | Type::NumW(_)) => Some(Type::Num(DEFAULT_NUM_PRECISION)),
                     (UnOp::Factorial, Type::BigNum(_)) => Some(Type::BigNum(DEFAULT_BIGNUM_PRECISION)),
-                    (UnOp::Factorial, Type::Int(_)) => Some(Type::Int(DEFAULT_INT_PRECISION)),
+                    (UnOp::Factorial, Type::Int(_)) => {
+                        self.check_int_const_overflow(expr, DEFAULT_INT_PRECISION);
+                        Some(Type::Int(DEFAULT_INT_PRECISION))
+                    }
                     (op, ity) => {
                         self.error(format!("{op} not supported on {ity}"));
                         None
@@ -430,18 +456,18 @@ impl TypeChecker {
                 // to `num`, since neither side is independently known as
                 // `int` without the other.
                 let (lty, rty) = match (lhs.as_ref(), rhs.as_ref()) {
-                    (Expr::Num(n, _), other) if !matches!(other, Expr::Num(_, _)) => {
+                    (Expr::Num(n, text), other) if !matches!(other, Expr::Num(_, _)) => {
                         let rty = self.check_expr(rhs);
                         let lty = match rty {
-                            Some(Type::Int(w)) => self.check_whole_number_literal(*n, w),
+                            Some(Type::Int(w)) => self.check_whole_number_literal(*n, text, w),
                             _ => self.check_expr(lhs),
                         };
                         (lty, rty)
                     }
-                    (other, Expr::Num(n, _)) if !matches!(other, Expr::Num(_, _)) => {
+                    (other, Expr::Num(n, text)) if !matches!(other, Expr::Num(_, _)) => {
                         let lty = self.check_expr(lhs);
                         let rty = match lty {
-                            Some(Type::Int(w)) => self.check_whole_number_literal(*n, w),
+                            Some(Type::Int(w)) => self.check_whole_number_literal(*n, text, w),
                             _ => self.check_expr(rhs),
                         };
                         (lty, rty)
@@ -460,7 +486,11 @@ impl TypeChecker {
                     }
                     return Some(Type::Str);
                 }
-                self.check_binary(*op, lty, rty)
+                let result = self.check_binary(*op, lty, rty);
+                if let Some(Type::Int(width)) = result {
+                    self.check_int_const_overflow(expr, width);
+                }
+                result
             }
             Expr::Call(name, args) => {
                 let ty = self.check_call(name, args)?;
@@ -633,8 +663,8 @@ impl TypeChecker {
     /// fine. Any other expression is unaffected, falling straight through
     /// to `check_expr`.
     fn check_expr_for(&mut self, expr: &Expr, target: Type) -> Option<Type> {
-        if let (Expr::Num(n, _), Type::Int(width)) = (expr, target) {
-            return self.check_whole_number_literal(*n, width);
+        if let (Expr::Num(n, text), Type::Int(width)) = (expr, target) {
+            return self.check_whole_number_literal(*n, text, width);
         }
         // Propagate an `int` target into a binary/unary expression's own
         // operands too -- not just a bare literal directly assigned.
@@ -651,12 +681,16 @@ impl TypeChecker {
             if *op != BinOp::Concat {
                 let lty = self.check_expr_for(lhs, target);
                 let rty = self.check_expr_for(rhs, target);
-                return self.check_binary(*op, lty?, rty?);
+                let result = self.check_binary(*op, lty?, rty?);
+                if let Some(Type::Int(width)) = result {
+                    self.check_int_const_overflow(expr, width);
+                }
+                return result;
             }
         }
         if let (Expr::Unary(op, inner), Type::Int(_)) = (expr, target) {
             let ity = self.check_expr_for(inner, target)?;
-            return match op {
+            let result = match op {
                 // Negation preserves whatever width the operand resolved
                 // to; factorial always forces the default width, same as
                 // the direct (non-propagated) check_expr arms above.
@@ -667,6 +701,10 @@ impl TypeChecker {
                     None
                 }
             };
+            if let Some(Type::Int(width)) = result {
+                self.check_int_const_overflow(expr, width);
+            }
+            return result;
         }
         let (Expr::ArrayLiteral(elements), Type::Array(elem)) = (expr, target) else {
             return self.check_expr(expr);
@@ -692,12 +730,131 @@ impl TypeChecker {
     /// actually be a whole number. `int` exists specifically to rule out
     /// a fractional value ever ending up in one, so this is checked at
     /// every point a literal could become `int`, not just storage.
-    fn check_whole_number_literal(&mut self, n: f64, width: u32) -> Option<Type> {
-        if n.fract() == 0.0 {
-            Some(Type::Int(width))
-        } else {
+    /// Also checked here: whether the literal's *value* actually fits
+    /// `width` -- unlike a value that only becomes known once the
+    /// program runs (still only checked at runtime, by codegen's
+    /// `coerce_int_width`), a literal's value is always known right now,
+    /// so a mismatch is a compile-time error rather than a program that
+    /// compiles successfully only to crash the moment it's run.
+    fn check_whole_number_literal(&mut self, n: f64, text: &str, width: u32) -> Option<Type> {
+        if n.fract() != 0.0 {
             self.error(format!("{n} is not a whole number, can't use it as int"));
-            None
+            return None;
+        }
+        let value = parse_int_literal(text, n);
+        let (min, max) = int_range_for(width);
+        if value < min || value > max {
+            self.error(format!("{value} doesn't fit in int[precision:{width}] ({min}..={max})"));
+            return None;
+        }
+        Some(Type::Int(width))
+    }
+
+    /// After `expr` type-checks as `Type::Int(width)`, also tries to
+    /// evaluate it as a compile-time constant -- if every operand is a
+    /// literal, whether the result overflows (or simply doesn't fit
+    /// `width`) is fully knowable right now, so this reports it as a
+    /// compile-time error instead of letting the program compile
+    /// successfully only to crash the moment it's actually run.
+    /// Silently does nothing whenever any part of `expr` isn't a
+    /// compile-time constant (a variable, a function call, ...) --
+    /// codegen's own runtime overflow check still covers that case, this
+    /// is purely an *earlier* catch for the case that's fully knowable
+    /// without running anything.
+    fn check_int_const_overflow(&mut self, expr: &Expr, width: u32) {
+        match self.try_const_eval_int(expr) {
+            ConstInt::NotConstant => {}
+            ConstInt::Overflowed => {
+                self.error("int overflow: this expression's result doesn't fit in a 64-bit int".to_string());
+            }
+            ConstInt::Value(value) => {
+                let (min, max) = int_range_for(width);
+                if value < min || value > max {
+                    self.error(format!("{value} doesn't fit in int[precision:{width}] ({min}..={max})"));
+                }
+            }
+        }
+    }
+
+    /// Recursively evaluates `expr` as a compile-time `int` constant --
+    /// `Expr::Num`/`Binary`/`Unary` handled directly (mirroring codegen's
+    /// `compile_int_expr`, which does the identical recursive descent at
+    /// runtime), everything else (a variable, a call, an array index)
+    /// reported as `NotConstant` since its value isn't known yet. A pure
+    /// function (no error reporting of its own) so an overflow found deep
+    /// in a nested expression propagates up as a single `Overflowed`
+    /// rather than each enclosing level reporting its own confusing
+    /// duplicate error. `Tetration` is deliberately not folded here (it
+    /// overflows almost immediately for any non-trivial literal base/
+    /// height anyway, and the runtime check already covers it) -- keeping
+    /// this to the operators the user actually asked about
+    /// (`(5000000000) x (5000000000)`-style overflow) rather than trying
+    /// to also compile-time-validate every other runtime failure mode
+    /// (a negative `xx` exponent, a negative factorial) this same
+    /// tree-walk could theoretically reach.
+    fn try_const_eval_int(&self, expr: &Expr) -> ConstInt {
+        match expr {
+            Expr::Num(n, text) => ConstInt::Value(parse_int_literal(text, *n)),
+            Expr::Unary(UnOp::Neg, inner) => match self.try_const_eval_int(inner) {
+                ConstInt::Value(v) => v.checked_neg().map_or(ConstInt::Overflowed, ConstInt::Value),
+                other => other,
+            },
+            Expr::Unary(UnOp::Factorial, inner) => match self.try_const_eval_int(inner) {
+                ConstInt::Value(n) if n >= 0 => {
+                    let mut acc: i64 = 1;
+                    for i in 2..=n {
+                        match acc.checked_mul(i) {
+                            Some(next) => acc = next,
+                            None => return ConstInt::Overflowed,
+                        }
+                    }
+                    ConstInt::Value(acc)
+                }
+                // A negative factorial is a different, narrower runtime
+                // failure mode than overflow -- left for the existing
+                // runtime path to handle, not folded here.
+                ConstInt::Value(_) => ConstInt::NotConstant,
+                other => other,
+            },
+            Expr::Binary(lhs, op, rhs) if *op != BinOp::Concat => {
+                let l = match self.try_const_eval_int(lhs) {
+                    ConstInt::Value(v) => v,
+                    other => return other,
+                };
+                let r = match self.try_const_eval_int(rhs) {
+                    ConstInt::Value(v) => v,
+                    other => return other,
+                };
+                match op {
+                    BinOp::Add => l.checked_add(r).map_or(ConstInt::Overflowed, ConstInt::Value),
+                    BinOp::Sub => l.checked_sub(r).map_or(ConstInt::Overflowed, ConstInt::Value),
+                    BinOp::Mul => l.checked_mul(r).map_or(ConstInt::Overflowed, ConstInt::Value),
+                    // Division by a literal zero is a different, narrower
+                    // runtime failure mode than overflow -- left for the
+                    // existing runtime check to report, not folded here.
+                    BinOp::Div if r == 0 => ConstInt::NotConstant,
+                    BinOp::Div => l.checked_div(r).map_or(ConstInt::Overflowed, ConstInt::Value),
+                    // A negative exponent is likewise a different failure
+                    // mode (it would only ever produce a fraction), not
+                    // folded here either.
+                    BinOp::Pow if r < 0 => ConstInt::NotConstant,
+                    BinOp::Pow => {
+                        let mut acc: i64 = 1;
+                        for _ in 0..r {
+                            match acc.checked_mul(l) {
+                                Some(next) => acc = next,
+                                None => return ConstInt::Overflowed,
+                            }
+                        }
+                        ConstInt::Value(acc)
+                    }
+                    // Comparisons produce `bool`, not `int`; `Tetration`
+                    // is deliberately not folded (see the doc comment
+                    // above).
+                    _ => ConstInt::NotConstant,
+                }
+            }
+            _ => ConstInt::NotConstant,
         }
     }
 }
