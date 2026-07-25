@@ -26,14 +26,18 @@ pub enum Type {
     /// own type purely for clarity at the type-system level, the same
     /// relationship `NumW` has to `Num`.
     File,
-    /// A genuine whole-number type -- a real 64-bit integer at the LLVM
-    /// level (not a float with a rule bolted on, unlike `Num`/`NumW`), so
+    /// A genuine whole-number type -- a real integer at the LLVM level
+    /// (not a float with a rule bolted on, unlike `Num`/`NumW`), so
     /// arithmetic is exact and `/` truncates rather than producing a
-    /// fraction. No `[precision:N]` yet -- a single fixed 64-bit width.
-    /// Doesn't coerce from `Num`/`NumW`/`BigNum` (only from `Int` itself,
-    /// like `Bool`) -- a fractional value ever ending up in an `Int` is
-    /// exactly what this type exists to rule out.
-    Int,
+    /// fraction. `[precision:8/16/32/64]`, default 64 -- real hardware
+    /// integer widths, unlike `Num`'s IEEE-754 float widths. Doesn't
+    /// coerce from `Num`/`NumW`/`BigNum` (only from `Int` itself, like
+    /// `Bool`) -- a fractional value ever ending up in an `Int` is
+    /// exactly what this type exists to rule out. Coerces freely between
+    /// its own different widths (mirroring `Num`/`NumW`'s "any precision"
+    /// convention) -- widening is always safe, narrowing is checked at
+    /// runtime and crashes if the value doesn't actually fit.
+    Int(u32),
     /// A growable, homogeneous array of `ElementType`. Flat (not `Box`ed
     /// or recursive) specifically so `Type` can stay `Copy` -- no arrays
     /// of arrays for this first version, only scalar element types.
@@ -53,7 +57,7 @@ pub enum ElementType {
     Str,
     BigNum(u32),
     File,
-    Int,
+    Int(u32),
 }
 
 impl ElementType {
@@ -65,7 +69,7 @@ impl ElementType {
             ElementType::Str => Type::Str,
             ElementType::BigNum(p) => Type::BigNum(p),
             ElementType::File => Type::File,
-            ElementType::Int => Type::Int,
+            ElementType::Int(w) => Type::Int(w),
         }
     }
 
@@ -80,7 +84,7 @@ impl ElementType {
             Type::Str => Some(ElementType::Str),
             Type::BigNum(p) => Some(ElementType::BigNum(p)),
             Type::File => Some(ElementType::File),
-            Type::Int => Some(ElementType::Int),
+            Type::Int(w) => Some(ElementType::Int(w)),
             Type::Array(_) | Type::Void => None,
         }
     }
@@ -94,6 +98,7 @@ impl std::fmt::Display for ElementType {
 
 pub const DEFAULT_NUM_PRECISION: u32 = 64;
 pub const DEFAULT_BIGNUM_PRECISION: u32 = 256;
+pub const DEFAULT_INT_PRECISION: u32 = 64;
 
 /// Renders a type the way it'd actually be written in CyborgPL source,
 /// for error messages -- `{:?}` (`Num(64)`) reads like Rust, not CyborgPL.
@@ -106,7 +111,7 @@ impl std::fmt::Display for Type {
             Type::Str => write!(f, "str"),
             Type::BigNum(p) => write!(f, "bignum[precision:{p}]"),
             Type::File => write!(f, "file"),
-            Type::Int => write!(f, "int"),
+            Type::Int(w) => write!(f, "int[precision:{w}]"),
             Type::Array(elem) => write!(f, "array:{elem}"),
             Type::Void => write!(f, "void"),
         }

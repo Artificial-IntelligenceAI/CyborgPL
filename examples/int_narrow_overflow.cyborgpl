@@ -1,0 +1,6 @@
+START
+var:int 'e' = (100) [precision:8];
+var:int 'f' = (100) [precision:8];
+print*"about to overflow int8"*;
+print*(ref:var:int[precision:8] 'e') + (ref:var:int[precision:8] 'f')*;
+END

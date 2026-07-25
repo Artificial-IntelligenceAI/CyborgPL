@@ -99,7 +99,7 @@ impl Parser {
             "str" => Ok(Type::Str),
             "bignum" => Ok(Type::BigNum(DEFAULT_BIGNUM_PRECISION)),
             "file" => Ok(Type::File),
-            "int" => Ok(Type::Int),
+            "int" => Ok(Type::Int(DEFAULT_INT_PRECISION)),
             // `array:elem_type`, e.g. `array:num`, `array:str` -- the
             // element type is parsed with the exact same grammar a bare
             // type would be (including its own `[precision:N]`, e.g.
@@ -163,7 +163,13 @@ impl Parser {
                 }
                 Ok(Type::BigNum(n as u32))
             }
-            _ => Err(format!("line {line}: [precision:N] only applies to num or bignum, not {ty:?}")),
+            Type::Int(_) => {
+                if ![8.0, 16.0, 32.0, 64.0].contains(&n) {
+                    return Err(format!("line {line}: int precision must be 8, 16, 32, or 64, found {n}"));
+                }
+                Ok(Type::Int(n as u32))
+            }
+            _ => Err(format!("line {line}: [precision:N] only applies to num, bignum, or int, not {ty:?}")),
         }
     }
 

@@ -1,0 +1,29 @@
+func 'add8'*'a': int[precision:8], 'b': int[precision:8]* -> int[precision:8] {
+    return (ref:var:int[precision:8] 'a') + (ref:var:int[precision:8] 'b');
+}
+
+START
+    var:int 'a' = (100) [precision:8];
+    var:int 'b' = (2000) [precision:16];
+    var:int 'c' = (100000) [precision:32];
+    var:int 'd' = (10000000000) [precision:64];
+    print*"a=" (ref:var:int[precision:8] 'a') " b=" (ref:var:int[precision:16] 'b') " c=" (ref:var:int[precision:32] 'c') " d=" (ref:var:int[precision:64] 'd')*;
+
+    # widening (narrow -> wide) is always exact
+    var:int 'wide' = (ref:var:int[precision:8] 'a') [precision:64];
+    print*"widened a=" (ref:var:int[precision:64] 'wide')*;
+
+    # narrowing that fits
+    var:int 'ok_narrow' = (ref:var:int[precision:8] 'a') [precision:16];
+    print*"narrowed a (fits)=" (ref:var:int[precision:16] 'ok_narrow')*;
+
+    # mixed-width arithmetic in one expression -- both operands widen to
+    # a full width for the op itself
+    print*"a+b=" (ref:var:int[precision:8] 'a') + (ref:var:int[precision:16] 'b')*;
+
+    print*"add8(50,60)=" ref:func 'add8'*(50), (60)**;
+
+    var:array:int[precision:8] 'nums' = {(1), (2), (3)};
+    append*(ref:var:array:int[precision:8] 'nums'), (4)*;
+    print*"nums[1]=" (ref:var:array:int[precision:8] 'nums'*(1)*) " nums[4]=" (ref:var:array:int[precision:8] 'nums'*(4)*)*;
+END

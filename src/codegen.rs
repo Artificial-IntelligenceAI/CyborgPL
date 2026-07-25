@@ -6,7 +6,7 @@ use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
 use inkwell::passes::PassBuilderOptions;
 use inkwell::targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine};
-use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FloatType, StructType};
+use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FloatType, IntType, StructType};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FloatValue, FunctionValue, IntValue, PointerValue};
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel};
 
@@ -430,7 +430,7 @@ impl<'ctx> Codegen<'ctx> {
             Type::Num(width) => self.float_type_for(width).into(),
             Type::NumW(width) => self.float_type_for(width).into(),
             Type::Bool => self.context.bool_type().into(),
-            Type::Int => self.context.i64_type().into(),
+            Type::Int(width) => self.int_type_for(width).into(),
             Type::Str | Type::File => self.context.ptr_type(AddressSpace::default()).into(),
             // Same wrapped-pointer shape as `BigNum` -- reused directly,
             // not a second copy of the same trick. Structurally identical
@@ -533,6 +533,16 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
+    fn int_type_for(&self, width: u32) -> IntType<'ctx> {
+        match width {
+            8 => self.context.i8_type(),
+            16 => self.context.i16_type(),
+            32 => self.context.i32_type(),
+            64 => self.context.i64_type(),
+            other => panic!("unsupported int precision: {other} (the parser should have rejected this)"),
+        }
+    }
+
     /// Widens or narrows a float to the given bit width, a no-op if it's
     /// already that width. Needed because two `num`s of different
     /// precisions can't be combined in an LLVM op directly (they must
@@ -562,6 +572,7 @@ impl<'ctx> Codegen<'ctx> {
         match (value, ty) {
             (BasicValueEnum::FloatValue(f), Type::Num(width)) => self.coerce_float(f, width).into(),
             (BasicValueEnum::FloatValue(f), Type::NumW(width)) => self.coerce_float(f, width).into(),
+            (BasicValueEnum::IntValue(iv), Type::Int(width)) => self.coerce_int_width(iv, width).into(),
             (_, Type::BigNum(precision)) => self.coerce_to_bignum(value, precision),
             (BasicValueEnum::PointerValue(p), Type::Str | Type::File) => self
                 .builder
@@ -572,6 +583,77 @@ impl<'ctx> Codegen<'ctx> {
                 .unwrap(),
             (_, Type::Array(elem)) => self.coerce_to_array(value, elem),
             _ => value,
+        }
+    }
+
+    /// Converts an `int` value to a *different* declared width -- a
+    /// no-op if it's already that width. Widening (moving to a *wider*
+    /// width) is always exact, a plain sign-extend. Narrowing is
+    /// overflow-checked: truncate, then sign-extend the truncated value
+    /// back up to the original width and compare against the original --
+    /// if they differ, the value didn't actually fit in the narrower
+    /// width, and it crashes with a clear message rather than silently
+    /// wrapping (two's-complement). This is the one place `int`'s
+    /// per-width safety is enforced; arithmetic itself always happens at
+    /// a full i64 internally (see `match_int_widths`/`compile_int_expr`),
+    /// so this is where that gets reconciled with whatever width the
+    /// value is actually being stored as.
+    fn coerce_int_width(&self, value: IntValue<'ctx>, target_width: u32) -> IntValue<'ctx> {
+        let current_width = value.get_type().get_bit_width();
+        if current_width == target_width {
+            return value;
+        }
+        let target_ty = self.int_type_for(target_width);
+        if current_width < target_width {
+            return self.builder.build_int_s_extend(value, target_ty, "int_widen").unwrap();
+        }
+        let truncated = self.builder.build_int_truncate(value, target_ty, "int_narrow").unwrap();
+        let round_tripped = self.builder.build_int_s_extend(truncated, value.get_type(), "int_narrow_roundtrip").unwrap();
+        let fits = self.builder.build_int_compare(IntPredicate::EQ, value, round_tripped, "int_narrow_fits").unwrap();
+        let overflowed = self.builder.build_not(fits, "int_narrow_overflowed").unwrap();
+        self.crash_if(overflowed, &format!("int overflow: value doesn't fit in int[precision:{target_width}]"));
+        truncated
+    }
+
+    /// Widens both operands of an int binary op to a full i64 --
+    /// arithmetic always happens at full width internally (mirroring
+    /// `match_float_widths`' "widen to compute" philosophy), so two ints
+    /// of different declared widths can be combined directly; the
+    /// declared *result* width (computed by the type checker as the
+    /// larger of the two operand widths) only matters later, whenever
+    /// the result actually gets stored somewhere with `coerce_int_width`.
+    fn match_int_widths(&self, li: IntValue<'ctx>, ri: IntValue<'ctx>) -> (IntValue<'ctx>, IntValue<'ctx>) {
+        (self.coerce_int_width(li, 64), self.coerce_int_width(ri, 64))
+    }
+
+    /// Compiles `expr` as an `int`, trusting the type checker has already
+    /// confirmed the whole subtree resolves to `int` -- used specifically
+    /// by `compile_and_coerce`'s propagation of a known `int` target into
+    /// a `Binary`/`Unary` expression's own operands (see there for why:
+    /// `var:int 'c' = (2) xx (10);` has no operand independently anchored
+    /// as `int`, so `compile_expr`'s own literal-pairing logic never
+    /// triggers on its own). Handles `Expr::Num`/`Binary`/`Unary`
+    /// directly and recursively (always at a full i64, narrowed only
+    /// once by the caller); anything else (a variable, a call, an array
+    /// index) falls back to plain `compile_expr`, which already produces
+    /// the correct int-shaped value for those.
+    fn compile_int_expr(&mut self, expr: &Expr) -> Result<IntValue<'ctx>, String> {
+        match expr {
+            Expr::Num(n, text) => Ok(self.context.i64_type().const_int(parse_int_literal(text, *n) as u64, true)),
+            Expr::Binary(lhs, op, rhs) if *op != BinOp::Concat => {
+                let l = self.compile_int_expr(lhs)?;
+                let r = self.compile_int_expr(rhs)?;
+                Ok(self.compile_int_binary(*op, l, r).into_int_value())
+            }
+            Expr::Unary(op, inner) => {
+                let iv = self.compile_int_expr(inner)?;
+                Ok(match op {
+                    UnOp::Neg => self.compile_int_neg(iv),
+                    UnOp::Factorial => self.compile_int_factorial(iv),
+                    UnOp::Not => panic!("Not on int should have been rejected by the type checker"),
+                })
+            }
+            other => Ok(self.compile_expr(other)?.into_int_value()),
         }
     }
 
@@ -602,14 +684,20 @@ impl<'ctx> Codegen<'ctx> {
         if let (Expr::ArrayLiteral(elements), Type::Array(elem)) = (expr, ty) {
             return self.compile_array_literal(elements, elem);
         }
-        // A bare numeric literal assigned to `int` needs a real i64
+        // A bare numeric literal assigned to `int` needs a real integer
         // constant, not the f64 `compile_expr`'s generic `Expr::Num` arm
         // always produces. Parses `text` directly rather than going
         // through the already-lossy `n` (an `f64`, exact only up to
         // 2^53) -- the same "read the original digits, not the lexer's
         // lossy float" fix `bignum`'s bare-literal case already needed.
-        if let (Expr::Num(n, text), Type::Int) = (expr, ty) {
-            return Ok(self.context.i64_type().const_int(parse_int_literal(text, *n) as u64, true).into());
+        // Always builds as a full i64 first, then narrows to the target
+        // width via `coerce_int_width` (overflow-checked if narrowing) --
+        // the same path any other int value goes through when stored,
+        // so a too-large literal for a narrow width crashes the same way
+        // a too-large *computed* value would, not silently truncated.
+        if let (Expr::Num(n, text), Type::Int(width)) = (expr, ty) {
+            let i64_val = self.context.i64_type().const_int(parse_int_literal(text, *n) as u64, true);
+            return Ok(self.coerce_int_width(i64_val, width).into());
         }
         // Propagate an `int` target into a binary/unary expression's own
         // operands too -- mirrors typecheck.rs's identical propagation
@@ -617,23 +705,25 @@ impl<'ctx> Codegen<'ctx> {
         // neither operand already known as `int` on its own, so
         // compile_expr's own Binary-arm literal-pairing check -- which
         // only fires when the *other* operand is already int-shaped --
-        // would never trigger, and both literals would compile as f64.
-        // The type checker has already confirmed this is well-typed by
-        // the time codegen runs, so `.into_int_value()` below is safe.
-        if let (Expr::Binary(lhs, op, rhs), Type::Int) = (expr, ty) {
+        // would never trigger, and both literals would compile as f64).
+        // Delegates the whole subtree to compile_int_expr (which handles
+        // Binary/Unary/bare-literal recursively, falling back to
+        // compile_expr for anything else, e.g. a variable reference --
+        // that must NOT be coerced to the target width here, since a
+        // variable's own width might differ and still needs to
+        // participate in the arithmetic at its own width first) rather
+        // than recursively calling compile_and_coerce on each operand,
+        // which would incorrectly narrow a non-literal operand (a wider
+        // variable) down to the target width *before* the operation runs.
+        if let (Expr::Binary(_, op, _), Type::Int(width)) = (expr, ty) {
             if *op != BinOp::Concat {
-                let l = self.compile_and_coerce(lhs, Type::Int)?.into_int_value();
-                let r = self.compile_and_coerce(rhs, Type::Int)?.into_int_value();
-                return Ok(self.compile_binary_int_op(*op, l, r));
+                let iv = self.compile_int_expr(expr)?;
+                return Ok(self.coerce_int_width(iv, width).into());
             }
         }
-        if let (Expr::Unary(op, inner), Type::Int) = (expr, ty) {
-            let iv = self.compile_and_coerce(inner, Type::Int)?.into_int_value();
-            return Ok(match op {
-                UnOp::Neg => self.compile_int_neg(iv).into(),
-                UnOp::Factorial => self.compile_int_factorial(iv).into(),
-                UnOp::Not => panic!("Not on int should have been rejected by the type checker"),
-            });
+        if let (Expr::Unary(_, _), Type::Int(width)) = (expr, ty) {
+            let iv = self.compile_int_expr(expr)?;
+            return Ok(self.coerce_int_width(iv, width).into());
         }
         let value = self.compile_expr(expr)?;
 
@@ -661,16 +751,25 @@ impl<'ctx> Codegen<'ctx> {
     }
 
     /// Compiles a bare numeric literal (`text`/`n`) that's paired, in a
-    /// binary op, with an already-compiled `other` operand -- as an i64
-    /// constant (parsed from `text` directly, same precision reasoning as
-    /// the bare-literal case in `compile_and_coerce`) if `other` is
-    /// genuinely `int` (a 64-bit `IntValue`, not `bool`'s i1), otherwise
-    /// as the usual f64. The type checker has already confirmed the
-    /// literal is a whole number whenever this produces `int`.
+    /// binary op, with an already-compiled `other` operand -- built and
+    /// overflow-checked directly at `other`'s own width (parsed from
+    /// `text` as a full i64 first, same precision reasoning as the
+    /// bare-literal case in `compile_and_coerce`, then narrowed via
+    /// `coerce_int_width`) if `other` is genuinely `int` (any of its
+    /// widths -- an `IntValue` that isn't `bool`'s i1), otherwise as the
+    /// usual f64. Matching `other`'s actual width here (rather than
+    /// always building a full i64) matters for `compile_int_binary`'s own
+    /// result-width computation right after this returns -- it needs the
+    /// literal's *real* width, or a literal paired with a narrow variable
+    /// would look artificially 64-bit-wide and never get narrowed back
+    /// down for its own overflow check. The type checker has already
+    /// confirmed the literal is a whole number whenever this produces
+    /// `int`.
     fn compile_literal_paired_with(&self, text: &str, n: f64, other: &BasicValueEnum<'ctx>) -> BasicValueEnum<'ctx> {
         if let BasicValueEnum::IntValue(iv) = other {
-            if iv.get_type().get_bit_width() == 64 {
-                return self.context.i64_type().const_int(parse_int_literal(text, n) as u64, true).into();
+            if iv.get_type().get_bit_width() != 1 {
+                let i64_val = self.context.i64_type().const_int(parse_int_literal(text, n) as u64, true);
+                return self.coerce_int_width(i64_val, iv.get_type().get_bit_width()).into();
             }
         }
         self.context.f64_type().const_float(n).into()
@@ -775,7 +874,7 @@ impl<'ctx> Codegen<'ctx> {
                 .basic()
                 .unwrap(),
             ElementType::BigNum(precision) => self.coerce_to_bignum(loaded, precision),
-            ElementType::Num(_) | ElementType::NumW(_) | ElementType::Bool | ElementType::Int => loaded,
+            ElementType::Num(_) | ElementType::NumW(_) | ElementType::Bool | ElementType::Int(_) => loaded,
         };
         let value_slot = self.entry_alloca(elem_llvm_ty, "array_copy_value_slot");
         self.builder.build_store(value_slot, to_append).unwrap();
@@ -905,7 +1004,7 @@ impl<'ctx> Codegen<'ctx> {
         match elem {
             ElementType::Str | ElementType::File => self.free_array_str_elements(handle),
             ElementType::BigNum(_) => self.free_array_bignum_elements(handle),
-            ElementType::Num(_) | ElementType::NumW(_) | ElementType::Bool | ElementType::Int => {}
+            ElementType::Num(_) | ElementType::NumW(_) | ElementType::Bool | ElementType::Int(_) => {}
         }
         self.builder.build_call(self.array_free_fn, &[handle.into()], "array_free_call").unwrap();
     }
@@ -1063,7 +1162,7 @@ impl<'ctx> Codegen<'ctx> {
             Type::Num(width) => self.float_type_for(width).fn_type(&param_types, false),
             Type::NumW(width) => self.float_type_for(width).fn_type(&param_types, false),
             Type::Bool => self.context.bool_type().fn_type(&param_types, false),
-            Type::Int => self.context.i64_type().fn_type(&param_types, false),
+            Type::Int(width) => self.int_type_for(width).fn_type(&param_types, false),
             Type::Str | Type::File => self.context.ptr_type(AddressSpace::default()).fn_type(&param_types, false),
             Type::BigNum(_) | Type::Array(_) => self.bignum_struct_type().fn_type(&param_types, false),
             Type::Void => self.context.void_type().fn_type(&param_types, false),
@@ -1153,8 +1252,8 @@ impl<'ctx> Codegen<'ctx> {
                     let zero = self.context.bool_type().const_int(0, false);
                     self.builder.build_return(Some(&zero)).unwrap();
                 }
-                Type::Int => {
-                    let zero = self.context.i64_type().const_int(0, true);
+                Type::Int(width) => {
+                    let zero = self.int_type_for(width).const_int(0, true);
                     self.builder.build_return(Some(&zero)).unwrap();
                 }
                 Type::Str | Type::File => {
@@ -1393,7 +1492,7 @@ impl<'ctx> Codegen<'ctx> {
                         let old_ptr = self.unwrap_bignum_ptr(old_wrapped);
                         self.free_bignum_ptr(old_ptr);
                     }
-                    ElementType::Num(_) | ElementType::NumW(_) | ElementType::Bool | ElementType::Int => {}
+                    ElementType::Num(_) | ElementType::NumW(_) | ElementType::Bool | ElementType::Int(_) => {}
                 }
 
                 self.builder.build_store(slot_ptr, new_value).unwrap();
@@ -1628,10 +1727,10 @@ impl<'ctx> Codegen<'ctx> {
                     (UnOp::Not, BasicValueEnum::IntValue(i)) if i.get_type().get_bit_width() == 1 => {
                         self.builder.build_not(i, "not").unwrap().into()
                     }
-                    (UnOp::Neg, BasicValueEnum::IntValue(i)) if i.get_type().get_bit_width() == 64 => {
+                    (UnOp::Neg, BasicValueEnum::IntValue(i)) if i.get_type().get_bit_width() != 1 => {
                         self.compile_int_neg(i).into()
                     }
-                    (UnOp::Factorial, BasicValueEnum::IntValue(i)) if i.get_type().get_bit_width() == 64 => {
+                    (UnOp::Factorial, BasicValueEnum::IntValue(i)) if i.get_type().get_bit_width() != 1 => {
                         self.compile_int_factorial(i).into()
                     }
                     (UnOp::Factorial, BasicValueEnum::FloatValue(f)) => {
@@ -1785,9 +1884,9 @@ impl<'ctx> Codegen<'ctx> {
                     // precedent as an out-of-range array index or invalid
                     // `input:num` text.
                     (BasicValueEnum::IntValue(li), BasicValueEnum::IntValue(ri))
-                        if li.get_type().get_bit_width() == 64 =>
+                        if li.get_type().get_bit_width() != 1 =>
                     {
-                        self.compile_binary_int_op(*op, li, ri)
+                        self.compile_int_binary(*op, li, ri)
                     }
                     (BasicValueEnum::IntValue(li), BasicValueEnum::IntValue(ri)) => match op {
                         BinOp::Eq => self.builder.build_int_compare(IntPredicate::EQ, li, ri, "eq").unwrap().into(),
@@ -2053,7 +2152,11 @@ impl<'ctx> Codegen<'ctx> {
                     .unwrap();
                 ("%s", chosen.into(), None)
             }
-            BasicValueEnum::IntValue(i) => ("%lld", i.into(), None),
+            // printf's vararg convention needs the full width regardless
+            // of int's own declared precision -- sign-extend narrower
+            // widths up to a full i64 first (always safe, never the
+            // narrowing/overflow-checked direction of coerce_int_width).
+            BasicValueEnum::IntValue(i) => ("%lld", self.coerce_int_width(i, 64).into(), None),
             BasicValueEnum::StructValue(_) => {
                 let ptr = self.unwrap_bignum_ptr(value);
                 let str_ptr = self
@@ -2132,14 +2235,42 @@ impl<'ctx> Codegen<'ctx> {
         buffer
     }
 
-    /// int's binary-op dispatch -- shared by `compile_expr`'s normal
-    /// `Expr::Binary` handling and `compile_and_coerce`'s propagation of
-    /// an `int` target into a binary expression's own bare-literal
-    /// operands (see there for why that's needed). Every arithmetic op
-    /// is overflow-checked, crashing with a clear message rather than
-    /// silently wrapping (two's-complement) -- the same "loud failure
-    /// over silent wrong data" precedent as an out-of-range array index
-    /// or invalid `input:num` text.
+    /// int's binary-op entry point -- shared by `compile_expr`'s normal
+    /// `Expr::Binary` handling and `compile_int_expr`'s recursive one
+    /// (used by `compile_and_coerce`'s propagation of a known `int`
+    /// target into a binary expression's own bare-literal operands, see
+    /// there for why that's needed). Computes the declared result width
+    /// as the larger of the two *actual* operand widths (mirroring
+    /// `check_binary`'s identical `lw.max(rw)` in typecheck.rs exactly),
+    /// widens both to a full i64 to actually perform the op (arithmetic
+    /// always happens at full width -- see `match_int_widths`), then
+    /// narrows an arithmetic result back down to that declared width
+    /// immediately -- not deferred until/unless the result is later
+    /// stored somewhere. This is what makes e.g. two `int[precision:8]`
+    /// values added and printed directly (never stored in a variable)
+    /// still crash on overflow, rather than silently computing at a wider
+    /// width just because nothing narrower ever consumed it. A comparison
+    /// result (`bool`, i1) is returned as-is -- there's no width to narrow.
+    fn compile_int_binary(&self, op: BinOp, li: IntValue<'ctx>, ri: IntValue<'ctx>) -> BasicValueEnum<'ctx> {
+        let result_width = li.get_type().get_bit_width().max(ri.get_type().get_bit_width());
+        let (li, ri) = self.match_int_widths(li, ri);
+        match self.compile_binary_int_op(op, li, ri) {
+            BasicValueEnum::IntValue(iv) if iv.get_type().get_bit_width() != 1 => {
+                self.coerce_int_width(iv, result_width).into()
+            }
+            other => other,
+        }
+    }
+
+    /// The actual per-operator dispatch, operating on two already-widened
+    /// (full i64) operands -- factored out of `compile_int_binary` so
+    /// `compile_int_expr`'s recursive case (which needs the *unwidened*
+    /// widths for its own narrowing step, computed one level up) can
+    /// still reach it directly. Every arithmetic op is overflow-checked,
+    /// crashing with a clear message rather than silently wrapping
+    /// (two's-complement) -- the same "loud failure over silent wrong
+    /// data" precedent as an out-of-range array index or invalid
+    /// `input:num` text.
     fn compile_binary_int_op(&self, op: BinOp, li: IntValue<'ctx>, ri: IntValue<'ctx>) -> BasicValueEnum<'ctx> {
         match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul => self.checked_int_arith(op, li, ri).into(),
@@ -2225,11 +2356,24 @@ impl<'ctx> Codegen<'ctx> {
     /// Negation, guarding the one value whose negation overflows:
     /// `i64::MIN` (its true negation, `i64::MAX + 1`, doesn't fit).
     fn compile_int_neg(&self, i: IntValue<'ctx>) -> IntValue<'ctx> {
+        // Negation preserves the operand's own width (see typecheck.rs),
+        // so the actual computation widens to i64 (arithmetic always
+        // happens at full width -- see match_int_widths), then narrows
+        // the result back down to whatever width `i` started at.
+        // coerce_int_width's own overflow check on that narrowing step
+        // is what catches e.g. negating a narrow width's own minimum
+        // value (int8's -128, whose negation -- 128 -- doesn't fit back
+        // into int8); the i64::MIN check below only matters when `i` was
+        // already a full i64 to begin with, since narrowing i64 to i64
+        // is a no-op that wouldn't otherwise catch it.
+        let original_width = i.get_type().get_bit_width();
+        let widened = self.coerce_int_width(i, 64);
         let i64_ty = self.context.i64_type();
         let int_min = i64_ty.const_int(i64::MIN as u64, true);
-        let is_int_min = self.builder.build_int_compare(IntPredicate::EQ, i, int_min, "int_neg_min_check").unwrap();
+        let is_int_min = self.builder.build_int_compare(IntPredicate::EQ, widened, int_min, "int_neg_min_check").unwrap();
         self.crash_if(is_int_min, "int overflow: negating i64::MIN doesn't fit in int");
-        self.builder.build_int_neg(i, "int_neg").unwrap()
+        let negated = self.builder.build_int_neg(widened, "int_neg").unwrap();
+        self.coerce_int_width(negated, original_width)
     }
 
     /// `xx` on `int`: real integer exponentiation via repeated
@@ -2316,9 +2460,15 @@ impl<'ctx> Codegen<'ctx> {
     /// below, but overflow-checked at each multiplication step --
     /// `21!` already exceeds `i64`'s range, unlike `num`'s float version,
     /// which just loses precision gracefully instead of overflowing.
+    /// Always returns a full i64 regardless of `n`'s own width (widened
+    /// here if narrower) -- factorial's result is always the default
+    /// width, same as `num`'s own factorial forcing a fixed precision
+    /// (see typecheck.rs), so there's no "original width" to narrow back
+    /// to the way negation has.
     fn compile_int_factorial(&self, n: IntValue<'ctx>) -> IntValue<'ctx> {
         let function = self.current_function();
         let i64_ty = self.context.i64_type();
+        let n = self.coerce_int_width(n, 64);
 
         let result_slot = self.entry_alloca(i64_ty.into(), "int_fact_result");
         self.builder.build_store(result_slot, i64_ty.const_int(1, true)).unwrap();

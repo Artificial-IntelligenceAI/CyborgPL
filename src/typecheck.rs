@@ -47,7 +47,7 @@ fn shape_of(ty: Type) -> Shape {
         Type::Str | Type::File => Shape::Str,
         Type::BigNum(_) => Shape::BigNum,
         Type::Array(_) => Shape::Array,
-        Type::Int => Shape::Int,
+        Type::Int(_) => Shape::Int,
         Type::Void => panic!("Void has no runtime shape; should never reach type-checking"),
     }
 }
@@ -393,17 +393,21 @@ impl TypeChecker {
                 match (op, ity) {
                     (UnOp::Neg, Type::Num(_) | Type::NumW(_)) => Some(ity),
                     (UnOp::Neg, Type::BigNum(_)) => Some(Type::BigNum(DEFAULT_BIGNUM_PRECISION)),
-                    (UnOp::Neg, Type::Int) => Some(Type::Int),
+                    // Negation preserves the operand's own width -- unlike
+                    // factorial, it doesn't change the value's magnitude
+                    // category, so there's no reason to force a different one.
+                    (UnOp::Neg, Type::Int(w)) => Some(Type::Int(w)),
                     (UnOp::Not, Type::Bool) => Some(Type::Bool),
-                    // Both forced to a fixed result type regardless of the
+                    // Forced to a fixed result type/width regardless of the
                     // operand's own precision -- matches compile_factorial
                     // (always 64-bit) / compile_bignum_factorial (always
-                    // default precision) exactly. Int factorial keeps the
-                    // operand's own (single, fixed) width -- there's only
-                    // one to keep.
+                    // default precision) exactly -- factorial results grow
+                    // fast enough that starting from the widest available
+                    // precision/width gives the most headroom before
+                    // overflowing/losing precision.
                     (UnOp::Factorial, Type::Num(_) | Type::NumW(_)) => Some(Type::Num(DEFAULT_NUM_PRECISION)),
                     (UnOp::Factorial, Type::BigNum(_)) => Some(Type::BigNum(DEFAULT_BIGNUM_PRECISION)),
-                    (UnOp::Factorial, Type::Int) => Some(Type::Int),
+                    (UnOp::Factorial, Type::Int(_)) => Some(Type::Int(DEFAULT_INT_PRECISION)),
                     (op, ity) => {
                         self.error(format!("{op} not supported on {ity}"));
                         None
@@ -428,7 +432,7 @@ impl TypeChecker {
                     (Expr::Num(n, _), other) if !matches!(other, Expr::Num(_, _)) => {
                         let rty = self.check_expr(rhs);
                         let lty = match rty {
-                            Some(Type::Int) => self.check_whole_number_literal(*n),
+                            Some(Type::Int(w)) => self.check_whole_number_literal(*n, w),
                             _ => self.check_expr(lhs),
                         };
                         (lty, rty)
@@ -436,7 +440,7 @@ impl TypeChecker {
                     (other, Expr::Num(n, _)) if !matches!(other, Expr::Num(_, _)) => {
                         let lty = self.check_expr(lhs);
                         let rty = match lty {
-                            Some(Type::Int) => self.check_whole_number_literal(*n),
+                            Some(Type::Int(w)) => self.check_whole_number_literal(*n, w),
                             _ => self.check_expr(rhs),
                         };
                         (lty, rty)
@@ -499,17 +503,28 @@ impl TypeChecker {
                     None
                 }
             },
-            (Shape::Int, Shape::Int) => match op {
-                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Pow | BinOp::Tetration => {
-                    Some(Type::Int)
+            // Widens to the larger of the two operand widths, mirroring
+            // `match_int_widths` in codegen (arithmetic always happens at
+            // a full i64 there; the declared result width here just
+            // needs to be *at least* as wide as either operand, so no
+            // information is lost before the caller's own storage
+            // boundary narrows it back down if needed).
+            (Shape::Int, Shape::Int) => {
+                let (Type::Int(lw), Type::Int(rw)) = (lty, rty) else {
+                    unreachable!("shape_of guarantees Type::Int for Shape::Int")
+                };
+                match op {
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Pow | BinOp::Tetration => {
+                        Some(Type::Int(lw.max(rw)))
+                    }
+                    BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => Some(Type::Bool),
+                    BinOp::And | BinOp::Or => {
+                        self.error(format!("{op} requires bool operands, not int"));
+                        None
+                    }
+                    BinOp::Concat => unreachable!("Concat is handled before check_binary is called"),
                 }
-                BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => Some(Type::Bool),
-                BinOp::And | BinOp::Or => {
-                    self.error(format!("{op} requires bool operands, not int"));
-                    None
-                }
-                BinOp::Concat => unreachable!("Concat is handled before check_binary is called"),
-            },
+            }
             (Shape::BigNum, Shape::BigNum) => match op {
                 BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => Some(Type::Bool),
                 BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Pow | BinOp::Tetration => {
@@ -600,8 +615,8 @@ impl TypeChecker {
     /// fine. Any other expression is unaffected, falling straight through
     /// to `check_expr`.
     fn check_expr_for(&mut self, expr: &Expr, target: Type) -> Option<Type> {
-        if let (Expr::Num(n, _), Type::Int) = (expr, target) {
-            return self.check_whole_number_literal(*n);
+        if let (Expr::Num(n, _), Type::Int(width)) = (expr, target) {
+            return self.check_whole_number_literal(*n, width);
         }
         // Propagate an `int` target into a binary/unary expression's own
         // operands too -- not just a bare literal directly assigned.
@@ -614,17 +629,21 @@ impl TypeChecker {
         // else still resolves to its own real type regardless of what's
         // propagated, and a genuine mismatch (e.g. pairing a `bignum`
         // where an `int` was expected) is still caught by `check_binary`.
-        if let (Expr::Binary(lhs, op, rhs), Type::Int) = (expr, target) {
+        if let (Expr::Binary(lhs, op, rhs), Type::Int(_)) = (expr, target) {
             if *op != BinOp::Concat {
                 let lty = self.check_expr_for(lhs, target);
                 let rty = self.check_expr_for(rhs, target);
                 return self.check_binary(*op, lty?, rty?);
             }
         }
-        if let (Expr::Unary(op, inner), Type::Int) = (expr, target) {
+        if let (Expr::Unary(op, inner), Type::Int(_)) = (expr, target) {
             let ity = self.check_expr_for(inner, target)?;
             return match op {
-                UnOp::Neg | UnOp::Factorial => Some(Type::Int),
+                // Negation preserves whatever width the operand resolved
+                // to; factorial always forces the default width, same as
+                // the direct (non-propagated) check_expr arms above.
+                UnOp::Neg => Some(ity),
+                UnOp::Factorial => Some(Type::Int(DEFAULT_INT_PRECISION)),
                 UnOp::Not => {
                     self.error(format!("{op} not supported on {ity}"));
                     None
@@ -655,9 +674,9 @@ impl TypeChecker {
     /// actually be a whole number. `int` exists specifically to rule out
     /// a fractional value ever ending up in one, so this is checked at
     /// every point a literal could become `int`, not just storage.
-    fn check_whole_number_literal(&mut self, n: f64) -> Option<Type> {
+    fn check_whole_number_literal(&mut self, n: f64, width: u32) -> Option<Type> {
         if n.fract() == 0.0 {
-            Some(Type::Int)
+            Some(Type::Int(width))
         } else {
             self.error(format!("{n} is not a whole number, can't use it as int"));
             None
@@ -688,9 +707,13 @@ fn coercible(from: Type, to: Type) -> bool {
         // No coercion from num/numw/bignum into int -- a fractional
         // value ever ending up in an int is exactly what the type exists
         // to rule out, so (unlike bignum, which happily accepts any
-        // numeric-shaped source) int only ever accepts int itself, the
-        // same restriction bool already has.
-        (Type::Int, Type::Int) => true,
+        // numeric-shaped source) int only ever accepts int itself.
+        // Unlike bool, though, int freely coerces between its *own*
+        // different widths (mirroring num/numw's "any precision"
+        // convention) -- purely a type-level allowance; codegen enforces
+        // actual safety at runtime (widening is always safe, narrowing
+        // is overflow-checked and crashes if the value doesn't fit).
+        (Type::Int(_), Type::Int(_)) => true,
         // No cross-element-type coercion -- an array:num can't quietly
         // become an array:str the way a bare num can become a str-typed
         // display via stch. Element types must match exactly.
