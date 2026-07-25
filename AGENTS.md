@@ -17,8 +17,8 @@ Backend/implementation choices — how codegen works internally, which crate to 
 - `src/main.rs` — CLI entry point; compiles a `.cyborgpl` file (or a built-in demo) to an object file, links it with `cc`, then **runs the result as a child process**. If you're ever measuring the compiled program's memory/CPU behavior, measure that child process (`/tmp/cyborgpl_out`), not the `CyborgPL` binary itself — they're different processes and conflating them gives meaningless numbers.
 - `runtime/fp128/quadmath.c` — a from-scratch software implementation of IEEE-754 quad precision (128-bit floats), since Apple's toolchain has no native 128-bit float type. `runtime/fp128/test_quadmath.c` is its standalone correctness harness (run it directly if you ever touch `quadmath.c`).
 - `runtime/gmp/bignum_shim.c` — a thin C wrapper around GMP's `mpf_t`, giving `bignum` simple fixed function signatures to call from LLVM IR.
-- `runtime/io/input_shim.c` — backs `input:str`/`input:num`, reading a line from stdin via `getline`.
-- `runtime/io/file_shim.c` — backs `print`'s/`overwrite`'s `[to*(dest)*]` file destination; `cyborg_fopen_or_die` wraps `fopen` and crashes with a clear message instead of codegen having to emit its own null-check IR.
+- `runtime/io/input_shim.c` — backs `input:str`/`input:num` reading from stdin (`getline`), and `cyborg_parse_num_or_die` (the number-validation half of `input:num`, shared between the stdin and file-source cases).
+- `runtime/io/file_shim.c` — backs `print`'s/`overwrite`'s `[to*(dest)*]` file destination and `input:`'s `[from*(dest)*]` file source; `cyborg_fopen_or_die`/`cyborg_read_file_or_die` crash with a clear message instead of codegen having to emit its own null-check IR.
 - `runtime/clock/clock_shim.c` — backs `clock:num`, elapsed seconds since the program started via `clock_gettime(CLOCK_MONOTONIC, ...)`, with the start timestamp captured by a C constructor that runs before `main`.
 - `examples/*.cyborgpl` — working example programs, all verified to actually run, not just written and assumed correct.
 

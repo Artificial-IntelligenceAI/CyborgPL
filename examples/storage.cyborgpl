@@ -7,5 +7,6 @@ print*(ref:var:str 'name')* [to*(ref:var:file 'x')*];
 overwrite*"hello world"* [to*("/tmp/cyborgpl_storage_example2.txt")*];
 
 print*"both files written -- this line still goes to the screen"*;
+print*"Hello, World!"*;
 
 END

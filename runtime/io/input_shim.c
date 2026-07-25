@@ -30,19 +30,29 @@ char *cyborg_read_line(void) {
 // defaulting to 0 -- there's no error-handling system in the language yet
 // for a CyborgPL program to recover from this itself, and a loud failure
 // right where the bad input was read is far easier to debug than a wrong
-// value quietly propagating somewhere else.
-double cyborg_read_num(void) {
-    char *line = cyborg_read_line();
+// value quietly propagating somewhere else. Shared by cyborg_read_num
+// (stdin) and cyborg_read_file_or_die's caller in codegen (a file's whole
+// content) -- same validation either way, just a different source for the
+// text being parsed.
+double cyborg_parse_num_or_die(const char *text) {
     char *end;
-    double value = strtod(line, &end);
-    while (*end == ' ' || *end == '\t') {
+    double value = strtod(text, &end);
+    // Trailing whitespace is fine either way this text arrived -- a typed
+    // stdin line never has any, but a file's content very often ends with
+    // a newline, which should still count as a fully-consumed valid number.
+    while (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r') {
         end++;
     }
-    if (end == line || *end != '\0') {
-        fprintf(stderr, "input:num -- '%s' is not a valid number\n", line);
-        free(line);
+    if (end == text || *end != '\0') {
+        fprintf(stderr, "input:num -- '%s' is not a valid number\n", text);
         exit(1);
     }
+    return value;
+}
+
+double cyborg_read_num(void) {
+    char *line = cyborg_read_line();
+    double value = cyborg_parse_num_or_die(line);
     free(line);
     return value;
 }

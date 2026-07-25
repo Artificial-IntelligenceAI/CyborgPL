@@ -146,10 +146,11 @@ pub enum PrintSegment {
 #[derive(Debug, Clone)]
 pub enum Stmt {
     VarDecl(String, Type, Expr),
-    /// `input:type 'name';` -- declares 'name' and reads its value from
-    /// stdin at runtime, rather than from a compiled expression. Currently
-    /// only `Str` and `Num` support this.
-    Input(String, Type),
+    /// `input:type 'name' [from*(source)*];` -- declares 'name' and reads
+    /// its value from stdin (source is `None`) or from a file's whole
+    /// content (source is `Some`, must be `Str`/`File`), rather than from
+    /// a compiled expression. Currently only `Str` and `Num` support this.
+    Input(String, Type, Option<Expr>),
     /// `clock:num 'name';` -- declares 'name' and reads elapsed seconds
     /// since the program started. Currently only `Num` supports this.
     Clock(String, Type),

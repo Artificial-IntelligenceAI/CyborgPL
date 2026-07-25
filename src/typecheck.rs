@@ -143,12 +143,15 @@ impl TypeChecker {
                 }
                 self.declare(name.clone(), *ty);
             }
-            Stmt::Input(name, ty) => {
+            Stmt::Input(name, ty, source) => {
                 // The parser only ever produces Str/Num here today, but
                 // checking anyway costs nothing and stays correct if that
                 // ever changes.
                 if !matches!(ty, Type::Str | Type::Num(_)) {
                     self.error(format!("input: doesn't support {ty} yet (only str and num)"));
+                }
+                if let Some(source_expr) = source {
+                    self.check_source(source_expr);
                 }
                 self.declare(name.clone(), *ty);
             }
@@ -251,9 +254,22 @@ impl TypeChecker {
     /// reads the pointer, so any bare-pointer-shaped type would technically
     /// "work," but only these two are meant to be used this way).
     fn check_dest(&mut self, dest: &Expr) {
-        if let Some(ty) = self.check_expr(dest) {
+        self.check_file_clause(dest, "to");
+    }
+
+    /// Checks a `[from*(source)*]` clause's source -- same rule as
+    /// `check_dest`, just the other bracket keyword for a clearer message.
+    fn check_source(&mut self, source: &Expr) {
+        self.check_file_clause(source, "from");
+    }
+
+    /// Shared by `check_dest`/`check_source`: must be `str` or `file`,
+    /// matching what codegen's `compile_write_to_file`/`cyborg_read_file_or_die`
+    /// call sites actually read the pointer as.
+    fn check_file_clause(&mut self, expr: &Expr, keyword: &str) {
+        if let Some(ty) = self.check_expr(expr) {
             if !matches!(ty, Type::Str | Type::File) {
-                self.error(format!("[to*...*] destination must be str or file, got {ty}"));
+                self.error(format!("[{keyword}*...*] must be str or file, got {ty}"));
             }
         }
     }

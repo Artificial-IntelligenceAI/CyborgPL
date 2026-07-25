@@ -1,0 +1,14 @@
+START
+
+var:str 'name' = ("Ada Lovelace");
+var:file 'x' = ("/tmp/cyborgpl_storage_read_example.txt");
+overwrite*(ref:var:str 'name')* [to*(ref:var:file 'x')*];
+
+input:str 'read_back' [from*(ref:var:file 'x')*];
+print*"read back: " (ref:var:str 'read_back')*;
+
+overwrite*"42.5"* [to*("/tmp/cyborgpl_storage_read_number.txt")*];
+input:num 'n' [from*("/tmp/cyborgpl_storage_read_number.txt")*];
+print*"read number: " (ref:var:num 'n') " doubled: " (ref:var:num 'n') x (2)*;
+
+END

@@ -123,6 +123,10 @@ pub struct Codegen<'ctx> {
     /// value with no extra strdup needed.
     read_line_fn: FunctionValue<'ctx>,
     read_num_fn: FunctionValue<'ctx>,
+    /// Extracted out of `cyborg_read_num` so `input:num [from*(dest)*];`
+    /// (parsing a whole file's content) can reuse the exact same
+    /// validation `cyborg_read_num` (stdin) already does.
+    parse_num_or_die_fn: FunctionValue<'ctx>,
     /// runtime/clock/clock_shim.c -- `clock:num`, elapsed seconds since
     /// the program started (captured once, before `main`, not from the
     /// first `clock:num` read).
@@ -134,6 +138,11 @@ pub struct Codegen<'ctx> {
     fopen_or_die_fn: FunctionValue<'ctx>,
     fprintf_fn: FunctionValue<'ctx>,
     fclose_fn: FunctionValue<'ctx>,
+    /// `input:`'s `[from*(dest)*]` clause -- reads dest's whole content
+    /// into a fresh owned buffer, adopted directly as `str` (or parsed via
+    /// `parse_num_or_die_fn` for `num`), same "crash with a clear message"
+    /// failure mode as opening a file for writing already has.
+    read_file_fn: FunctionValue<'ctx>,
     bignum: BignumFns<'ctx>,
 }
 
@@ -171,6 +180,10 @@ impl<'ctx> Codegen<'ctx> {
         let read_num_type = f64_type.fn_type(&[], false);
         let read_num_fn = module.add_function("cyborg_read_num", read_num_type, Some(Linkage::External));
 
+        let parse_num_or_die_type = f64_type.fn_type(&[i8_ptr.into()], false);
+        let parse_num_or_die_fn =
+            module.add_function("cyborg_parse_num_or_die", parse_num_or_die_type, Some(Linkage::External));
+
         let clock_elapsed_type = f64_type.fn_type(&[], false);
         let clock_elapsed_fn = module.add_function("cyborg_clock_elapsed", clock_elapsed_type, Some(Linkage::External));
 
@@ -182,6 +195,9 @@ impl<'ctx> Codegen<'ctx> {
 
         let fclose_type = context.i32_type().fn_type(&[i8_ptr.into()], false);
         let fclose_fn = module.add_function("fclose", fclose_type, Some(Linkage::External));
+
+        let read_file_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
+        let read_file_fn = module.add_function("cyborg_read_file_or_die", read_file_type, Some(Linkage::External));
 
         // runtime/gmp/bignum_shim.c -- every handle is an opaque i8_ptr, so
         // these signatures are the same shape regardless of what GMP itself
@@ -276,10 +292,12 @@ impl<'ctx> Codegen<'ctx> {
             strdup_fn,
             read_line_fn,
             read_num_fn,
+            parse_num_or_die_fn,
             clock_elapsed_fn,
             fopen_or_die_fn,
             fprintf_fn,
             fclose_fn,
+            read_file_fn,
             bignum,
         }
     }
@@ -762,7 +780,7 @@ impl<'ctx> Codegen<'ctx> {
                 self.declare_scoped(key.clone());
                 self.variables.insert(key, (alloca, llvm_ty));
             }
-            Stmt::Input(name, ty) => {
+            Stmt::Input(name, ty, source) => {
                 let key = (name.clone(), *ty);
 
                 // Same redeclare-vs-shadow distinction as VarDecl above.
@@ -774,17 +792,27 @@ impl<'ctx> Codegen<'ctx> {
                     }
                 }
 
-                let value: BasicValueEnum = match *ty {
-                    // cyborg_read_line's result is already a fresh, owned
-                    // malloc'd buffer -- adopted directly, no strdup needed.
-                    Type::Str => self
+                let value: BasicValueEnum = match (*ty, source) {
+                    // cyborg_read_line's/cyborg_read_file_or_die's result
+                    // is already a fresh, owned malloc'd buffer -- adopted
+                    // directly, no strdup needed either way.
+                    (Type::Str, None) => self
                         .builder
                         .build_call(self.read_line_fn, &[], "read_line_call")
                         .unwrap()
                         .try_as_basic_value()
                         .basic()
                         .unwrap(),
-                    Type::Num(width) => {
+                    (Type::Str, Some(src)) => {
+                        let path = self.compile_expr(src)?.into_pointer_value();
+                        self.builder
+                            .build_call(self.read_file_fn, &[path.into()], "read_file_call")
+                            .unwrap()
+                            .try_as_basic_value()
+                            .basic()
+                            .unwrap()
+                    }
+                    (Type::Num(width), None) => {
                         let raw = self
                             .builder
                             .build_call(self.read_num_fn, &[], "read_num_call")
@@ -795,7 +823,31 @@ impl<'ctx> Codegen<'ctx> {
                             .into_float_value();
                         self.coerce_float(raw, width).into()
                     }
-                    other => panic!("input not supported for {other:?} yet"),
+                    (Type::Num(width), Some(src)) => {
+                        let path = self.compile_expr(src)?.into_pointer_value();
+                        let text = self
+                            .builder
+                            .build_call(self.read_file_fn, &[path.into()], "read_file_call")
+                            .unwrap()
+                            .try_as_basic_value()
+                            .basic()
+                            .unwrap()
+                            .into_pointer_value();
+                        let raw = self
+                            .builder
+                            .build_call(self.parse_num_or_die_fn, &[text.into()], "parse_num_call")
+                            .unwrap()
+                            .try_as_basic_value()
+                            .basic()
+                            .unwrap()
+                            .into_float_value();
+                        // Unlike the Str case, nothing adopts this buffer
+                        // -- it was only needed to extract the number, so
+                        // it must be freed once consumed.
+                        self.builder.build_call(self.libc_free, &[text.into()], "read_file_temp_free_call").unwrap();
+                        self.coerce_float(raw, width).into()
+                    }
+                    (other, _) => panic!("input not supported for {other:?} yet"),
                 };
 
                 let llvm_ty = self.basic_type(*ty);

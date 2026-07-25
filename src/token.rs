@@ -41,6 +41,9 @@ pub enum Token {
     /// `[to*(dest)*]` -- the file-destination clause `print` (optionally)
     /// and `overwrite` (always) can take.
     To,
+    /// `[from*(dest)*]` -- the file-source clause `input:` (optionally)
+    /// can take, reading its whole content instead of a line from stdin.
+    From,
     /// Marks the start of the program's entry point block (replaces `fn main`).
     Start,
     End,
@@ -108,6 +111,7 @@ impl Token {
             "clock" => Some(Token::Clock),
             "overwrite" => Some(Token::Overwrite),
             "to" => Some(Token::To),
+            "from" => Some(Token::From),
             "not" => Some(Token::Not),
             "START" => Some(Token::Start),
             "END" => Some(Token::End),

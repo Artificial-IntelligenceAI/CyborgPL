@@ -228,17 +228,22 @@ impl Parser {
     /// if there's no `[` here at all. Whether `None` is actually allowed
     /// (as for `print`) or must be rejected (as for `overwrite`, which
     /// requires a destination) is the caller's job.
-    fn parse_to_clause(&mut self) -> PResult<Option<Expr>> {
+    /// Parses an optional `[keyword*(expr)*]` clause -- `[to*(dest)*]` for
+    /// `print`/`overwrite`, `[from*(source)*]` for `input:`. `None` if
+    /// there's no `[` here at all; whether `None` is actually allowed is
+    /// each caller's job (optional for `print`/`input:`, required for
+    /// `overwrite`).
+    fn parse_bracket_clause(&mut self, keyword: Token) -> PResult<Option<Expr>> {
         if !self.check(&Token::LBracket) {
             return Ok(None);
         }
         self.advance();
-        self.expect(Token::To)?;
+        self.expect(keyword)?;
         self.expect(Token::Star)?;
-        let dest = self.parse_expr()?;
+        let expr = self.parse_expr()?;
         self.expect(Token::Star)?;
         self.expect(Token::RBracket)?;
-        Ok(Some(dest))
+        Ok(Some(expr))
     }
 
     fn parse_stmt(&mut self) -> PResult<Stmt> {
@@ -267,8 +272,9 @@ impl Parser {
                 let ty = self.parse_type()?;
                 let ty = self.parse_optional_precision(ty)?;
                 let name = self.expect_quoted_ident()?;
+                let source = self.parse_bracket_clause(Token::From)?;
                 self.expect(Token::Semicolon)?;
-                Ok(Stmt::Input(name, ty))
+                Ok(Stmt::Input(name, ty, source))
             }
             // `clock:num 'name';` -- same shape as `input:` above.
             Token::Clock => {
@@ -326,7 +332,7 @@ impl Parser {
             Token::Print => {
                 self.advance();
                 let segments = self.parse_print_segments()?;
-                let dest = self.parse_to_clause()?;
+                let dest = self.parse_bracket_clause(Token::To)?;
                 self.expect(Token::Semicolon)?;
                 Ok(Stmt::Print(segments, dest))
             }
@@ -336,7 +342,7 @@ impl Parser {
             Token::Overwrite => {
                 self.advance();
                 let segments = self.parse_print_segments()?;
-                let dest = match self.parse_to_clause()? {
+                let dest = match self.parse_bracket_clause(Token::To)? {
                     Some(dest) => dest,
                     None => {
                         return Err(format!(
