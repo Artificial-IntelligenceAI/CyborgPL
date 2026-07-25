@@ -392,10 +392,11 @@ impl TypeChecker {
                 let ity = self.check_expr(inner)?;
                 match (op, ity) {
                     (UnOp::Neg, Type::Num(_) | Type::NumW(_)) => Some(ity),
-                    (UnOp::Neg, Type::BigNum(_)) => Some(Type::BigNum(DEFAULT_BIGNUM_PRECISION)),
-                    // Negation preserves the operand's own width -- unlike
-                    // factorial, it doesn't change the value's magnitude
-                    // category, so there's no reason to force a different one.
+                    // Negation preserves the operand's own precision/width --
+                    // unlike factorial, it doesn't change the value's
+                    // magnitude category, so there's no reason to force a
+                    // different one.
+                    (UnOp::Neg, Type::BigNum(_)) => Some(ity),
                     (UnOp::Neg, Type::Int(w)) => Some(Type::Int(w)),
                     (UnOp::Not, Type::Bool) => Some(Type::Bool),
                     // Forced to a fixed result type/width regardless of the
@@ -525,17 +526,34 @@ impl TypeChecker {
                     BinOp::Concat => unreachable!("Concat is handled before check_binary is called"),
                 }
             }
-            (Shape::BigNum, Shape::BigNum) => match op {
-                BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => Some(Type::Bool),
-                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Pow | BinOp::Tetration => {
-                    Some(Type::BigNum(DEFAULT_BIGNUM_PRECISION))
+            // Widens to the larger of the two operand precisions,
+            // mirroring `Shape::Int` above and codegen's identical
+            // `bignum_precision_of_expr` computation. The shape remap
+            // above means one (or both) side's `Type` here might
+            // actually still be a plain `Num`/`NumW` (promoted to match
+            // the bignum side) rather than genuinely `BigNum` -- mirrors
+            // codegen's `coerce_to_bignum`, where a promoted float takes
+            // on the bignum side's own precision, not some default, so
+            // the result is simply whichever precision the real bignum
+            // side(s) have.
+            (Shape::BigNum, Shape::BigNum) => {
+                let bignum_precision = match (lty, rty) {
+                    (Type::BigNum(lp), Type::BigNum(rp)) => lp.max(rp),
+                    (Type::BigNum(p), _) | (_, Type::BigNum(p)) => p,
+                    _ => unreachable!("shape remap guarantees at least one side is BigNum"),
+                };
+                match op {
+                    BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => Some(Type::Bool),
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Pow | BinOp::Tetration => {
+                        Some(Type::BigNum(bignum_precision))
+                    }
+                    BinOp::And | BinOp::Or => {
+                        self.error(format!("{op} not supported on bignum yet"));
+                        None
+                    }
+                    BinOp::Concat => unreachable!("Concat is handled before check_binary is called"),
                 }
-                BinOp::And | BinOp::Or => {
-                    self.error(format!("{op} not supported on bignum yet"));
-                    None
-                }
-                BinOp::Concat => unreachable!("Concat is handled before check_binary is called"),
-            },
+            }
             _ => {
                 self.error(format!("{op} used with mismatched operand types {lty} / {rty}"));
                 None

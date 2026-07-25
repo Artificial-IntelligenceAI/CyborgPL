@@ -509,6 +509,45 @@ impl<'ctx> Codegen<'ctx> {
         self.wrap_bignum_ptr(handle)
     }
 
+    /// Determines what precision an expression, already known (or about
+    /// to be used) as a `bignum`, actually gets constructed at -- purely
+    /// via static AST inspection, mirroring typecheck.rs's own precision
+    /// computation exactly (the same "widen to the larger operand" rule
+    /// `check_binary` now applies, the same "a promoted float takes on
+    /// the bignum side's own precision" rule `coerce_to_bignum` already
+    /// follows, and the same "Neg preserves, Factorial always defaults"
+    /// split `Expr::Unary` already has). No runtime GMP query is needed
+    /// for this, unlike `int`'s overflow checking: a bignum's precision
+    /// is fixed once at construction (`bignum_new`) and never changes
+    /// afterward, so it's a purely static, type-level property -- as
+    /// long as this stays a faithful mirror of typecheck's computation,
+    /// codegen's constructed precision and the type checker's reported
+    /// one can never drift apart. `None` means `expr` isn't bignum-shaped
+    /// at all (e.g. a plain `num` -- relevant only while recursing into a
+    /// `Binary` node that might mix the two).
+    fn bignum_precision_of_expr(&self, expr: &Expr) -> Option<u32> {
+        match expr {
+            Expr::Var(_, Type::BigNum(p)) => Some(*p),
+            Expr::ArrayIndex(_, Type::Array(ElementType::BigNum(p)), _) => Some(*p),
+            Expr::Call(name, _) => match self.function_sigs.get(name) {
+                Some((_, Type::BigNum(p))) => Some(*p),
+                _ => None,
+            },
+            Expr::Unary(UnOp::Neg, inner) => self.bignum_precision_of_expr(inner),
+            Expr::Unary(UnOp::Factorial, inner) => {
+                self.bignum_precision_of_expr(inner).map(|_| DEFAULT_BIGNUM_PRECISION)
+            }
+            Expr::Binary(lhs, op, rhs) if *op != BinOp::Concat => {
+                match (self.bignum_precision_of_expr(lhs), self.bignum_precision_of_expr(rhs)) {
+                    (Some(a), Some(b)) => Some(a.max(b)),
+                    (Some(a), None) | (None, Some(a)) => Some(a),
+                    (None, None) => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     fn float_type_for(&self, width: u32) -> FloatType<'ctx> {
         match width {
             16 => self.context.f16_type(),
@@ -1742,14 +1781,20 @@ impl<'ctx> Codegen<'ctx> {
                     }
                     (UnOp::Neg, v @ BasicValueEnum::StructValue(_)) => {
                         let src = self.unwrap_bignum_ptr(v);
-                        let dst = self.bignum_new(DEFAULT_BIGNUM_PRECISION);
+                        // Preserves the operand's own precision (mirroring
+                        // typecheck.rs's identical decision) rather than
+                        // forcing the default -- negation doesn't change
+                        // the value's magnitude category, so there's no
+                        // reason to widen or narrow it.
+                        let precision = self.bignum_precision_of_expr(inner).unwrap_or(DEFAULT_BIGNUM_PRECISION);
+                        let dst = self.bignum_new(precision);
                         self.builder.build_call(self.bignum.neg, &[dst.into(), src.into()], "bignum_neg_call").unwrap();
                         // Same lifetime story as every other fresh bignum
                         // temporary (see bignum_temps' field docs): nothing
                         // adopts this handle, so the enclosing statement
                         // frees it once it's done being consumed.
                         let wrapped = self.wrap_bignum_ptr(dst);
-                        self.bignum_temps.push((dst, wrapped, DEFAULT_BIGNUM_PRECISION));
+                        self.bignum_temps.push((dst, wrapped, precision));
                         wrapped
                     }
                     (UnOp::Factorial, v @ BasicValueEnum::StructValue(_)) => {
@@ -1797,24 +1842,29 @@ impl<'ctx> Codegen<'ctx> {
                 // LLVM op directly -- widen the narrower one to match first.
                 let (l, r) = self.match_float_widths(l, r);
                 // Mixing a bignum with a plain num/literal: promote the
-                // float side to a fresh bignum (at the default precision,
-                // same simplification already accepted for bignum-bignum
-                // ops not widening to a larger operand's precision) so
-                // every bignum arm below only ever has to handle
-                // bignum-vs-bignum. The promoted value is a genuine new
-                // temporary nothing else references, so it's registered
-                // for the enclosing statement to free like any other.
+                // float side to a fresh bignum -- at the *bignum* side's
+                // own precision (via bignum_precision_of_expr), not a
+                // fixed default, so combining with e.g. a
+                // [precision:1000] bignum doesn't needlessly widen a
+                // smaller one up to the default, or silently narrow a
+                // larger one down -- so every bignum arm below only ever
+                // has to handle bignum-vs-bignum. The promoted value is a
+                // genuine new temporary nothing else references, so it's
+                // registered for the enclosing statement to free like any
+                // other.
                 let (l, r) = match (l, r) {
                     (BasicValueEnum::StructValue(_), BasicValueEnum::FloatValue(f)) => {
-                        let coerced = self.coerce_to_bignum(f.into(), DEFAULT_BIGNUM_PRECISION);
+                        let precision = self.bignum_precision_of_expr(lhs).unwrap_or(DEFAULT_BIGNUM_PRECISION);
+                        let coerced = self.coerce_to_bignum(f.into(), precision);
                         let ptr = self.unwrap_bignum_ptr(coerced);
-                        self.bignum_temps.push((ptr, coerced, DEFAULT_BIGNUM_PRECISION));
+                        self.bignum_temps.push((ptr, coerced, precision));
                         (l, coerced)
                     }
                     (BasicValueEnum::FloatValue(f), BasicValueEnum::StructValue(_)) => {
-                        let coerced = self.coerce_to_bignum(f.into(), DEFAULT_BIGNUM_PRECISION);
+                        let precision = self.bignum_precision_of_expr(rhs).unwrap_or(DEFAULT_BIGNUM_PRECISION);
+                        let coerced = self.coerce_to_bignum(f.into(), precision);
                         let ptr = self.unwrap_bignum_ptr(coerced);
-                        self.bignum_temps.push((ptr, coerced, DEFAULT_BIGNUM_PRECISION));
+                        self.bignum_temps.push((ptr, coerced, precision));
                         (coerced, r)
                     }
                     other => other,
@@ -1939,12 +1989,20 @@ impl<'ctx> Codegen<'ctx> {
                     (BasicValueEnum::StructValue(_), BasicValueEnum::StructValue(_)) if op == &BinOp::Tetration => {
                         let lp = self.unwrap_bignum_ptr(l);
                         let rp = self.unwrap_bignum_ptr(r);
-                        let dst = self.compile_bignum_tetration(lp, rp);
+                        // Widens to the larger of the two operands' own
+                        // precisions (mirroring typecheck.rs's identical
+                        // `check_binary` computation), rather than always
+                        // defaulting -- see bignum_precision_of_expr.
+                        let result_precision = self
+                            .bignum_precision_of_expr(lhs)
+                            .unwrap_or(DEFAULT_BIGNUM_PRECISION)
+                            .max(self.bignum_precision_of_expr(rhs).unwrap_or(DEFAULT_BIGNUM_PRECISION));
+                        let dst = self.compile_bignum_tetration(lp, rp, result_precision);
                         // Same reasoning as the shim_fn arm below: nothing
                         // adopts this handle, so it's registered for the
                         // enclosing statement to free once it's done with it.
                         let wrapped = self.wrap_bignum_ptr(dst);
-                        self.bignum_temps.push((dst, wrapped, DEFAULT_BIGNUM_PRECISION));
+                        self.bignum_temps.push((dst, wrapped, result_precision));
                         wrapped
                     }
                     (BasicValueEnum::StructValue(_), BasicValueEnum::StructValue(_)) => {
@@ -1958,7 +2016,15 @@ impl<'ctx> Codegen<'ctx> {
                         };
                         let lp = self.unwrap_bignum_ptr(l);
                         let rp = self.unwrap_bignum_ptr(r);
-                        let dst = self.bignum_new(DEFAULT_BIGNUM_PRECISION);
+                        // Widens to the larger of the two operands' own
+                        // precisions (mirroring typecheck.rs's identical
+                        // `check_binary` computation), rather than always
+                        // defaulting -- see bignum_precision_of_expr.
+                        let result_precision = self
+                            .bignum_precision_of_expr(lhs)
+                            .unwrap_or(DEFAULT_BIGNUM_PRECISION)
+                            .max(self.bignum_precision_of_expr(rhs).unwrap_or(DEFAULT_BIGNUM_PRECISION));
+                        let dst = self.bignum_new(result_precision);
                         self.builder.build_call(shim_fn, &[dst.into(), lp.into(), rp.into()], "bignum_op_call").unwrap();
                         // Nothing else ever adopts this handle -- whatever
                         // consumes it (a store via coerce_to_bignum, a print,
@@ -1966,7 +2032,7 @@ impl<'ctx> Codegen<'ctx> {
                         // it. Registered here so the end of whichever
                         // statement this expression is part of can free it.
                         let wrapped = self.wrap_bignum_ptr(dst);
-                        self.bignum_temps.push((dst, wrapped, DEFAULT_BIGNUM_PRECISION));
+                        self.bignum_temps.push((dst, wrapped, result_precision));
                         wrapped
                     }
                     (l, r) => panic!("binary {op:?} used with mismatched operand types {l:?} / {r:?}"),
@@ -2554,8 +2620,16 @@ impl<'ctx> Codegen<'ctx> {
     /// unfreed, this would leak once per tetration step, the same class
     /// of bug the scope-based cleanup elsewhere fixed for named variables.
     /// Returns a raw (unwrapped) handle, matching how the plain shim_fn
-    /// arm hands its `dst` back to the caller to wrap once.
-    fn compile_bignum_tetration(&mut self, base: PointerValue<'ctx>, height: PointerValue<'ctx>) -> PointerValue<'ctx> {
+    /// arm hands its `dst` back to the caller to wrap once. `precision`
+    /// is the caller's already-computed `max(base_precision,
+    /// height_precision)` (see `bignum_precision_of_expr`), used for
+    /// every intermediate step -- not a fixed default.
+    fn compile_bignum_tetration(
+        &mut self,
+        base: PointerValue<'ctx>,
+        height: PointerValue<'ctx>,
+        precision: u32,
+    ) -> PointerValue<'ctx> {
         let function = self.current_function();
         let i64_ty = self.context.i64_type();
         let bignum_ty = self.bignum_struct_type();
@@ -2569,7 +2643,7 @@ impl<'ctx> Codegen<'ctx> {
             .unwrap()
             .into_int_value();
 
-        let initial = self.bignum_new(DEFAULT_BIGNUM_PRECISION);
+        let initial = self.bignum_new(precision);
         self.builder.build_call(self.bignum.copy, &[initial.into(), base.into()], "tet_bignum_init_copy").unwrap();
         let result_slot = self.entry_alloca(bignum_ty.into(), "tet_bignum_result");
         self.builder.build_store(result_slot, self.wrap_bignum_ptr(initial)).unwrap();
@@ -2592,7 +2666,7 @@ impl<'ctx> Codegen<'ctx> {
         self.builder.position_at_end(body_bb);
         let current_wrapped = self.builder.build_load(bignum_ty, result_slot, "tet_bignum_result_load").unwrap();
         let current_ptr = self.unwrap_bignum_ptr(current_wrapped);
-        let next = self.bignum_new(DEFAULT_BIGNUM_PRECISION);
+        let next = self.bignum_new(precision);
         self.builder.build_call(self.bignum.pow, &[next.into(), base.into(), current_ptr.into()], "tet_bignum_pow").unwrap();
         self.free_bignum_ptr(current_ptr);
         self.builder.build_store(result_slot, self.wrap_bignum_ptr(next)).unwrap();
