@@ -78,20 +78,25 @@ pub struct Codegen<'ctx> {
     /// pushes one frame and pops it when the block ends, restoring
     /// whatever `variables` looked like before that block ran.
     scopes: Vec<Vec<ScopeEntry<'ctx>>>,
-    /// Bignum handles allocated as *intermediate* expression results (only
-    /// source today: the binary-op arm below) during the statement
+    /// Bignum handles allocated as *intermediate* expression results
+    /// (binary/unary ops, a bignum-returning call) during the statement
     /// currently being compiled -- never a named variable's own handle.
-    /// Drained and freed once that statement finishes, since nothing else
-    /// will ever reference them (every consumer -- coerce_to_bignum,
-    /// bignum_to_string, an enclosing binary op -- reads/copies, never
-    /// adopts the pointer). Each entry keeps both the raw handle (to free)
-    /// and the exact wrapped value produced for it (`build_extract_value`
+    /// Drained and freed once that statement finishes, unless
+    /// `compile_and_coerce` adopts one directly instead (see its own
+    /// docs) -- every other consumer (coerce_to_bignum's copy path,
+    /// bignum_to_string, an enclosing binary op) only reads/copies,
+    /// never adopts the pointer. Each entry keeps the raw handle (to
+    /// free), the exact wrapped value produced for it (`build_extract_value`
     /// makes a *new* instruction every time it's called, even reading the
     /// same field back out of the same struct -- so identifying "is this
     /// literally the value this statement is returning" has to compare
     /// against that original produced value, not a freshly re-extracted
-    /// pointer, or the comparison never matches).
-    bignum_temps: Vec<(PointerValue<'ctx>, BasicValueEnum<'ctx>)>,
+    /// pointer, or the comparison never matches), and the precision the
+    /// handle actually holds (almost always `DEFAULT_BIGNUM_PRECISION`,
+    /// except a call to a function whose own declared return precision
+    /// differs) -- needed so adopting a temp directly can confirm its
+    /// precision genuinely matches the target before skipping the copy.
+    bignum_temps: Vec<(PointerValue<'ctx>, BasicValueEnum<'ctx>, u32)>,
     /// `str` values produced by `stch` or a str-returning call, not yet
     /// adopted by a variable/return -- simpler than `bignum_temps` since
     /// `str` is a bare pointer already (no struct-wrapping identity concern).
@@ -550,6 +555,27 @@ impl<'ctx> Codegen<'ctx> {
             return self.compile_array_literal(elements, elem);
         }
         let value = self.compile_expr(expr)?;
+
+        // If `value` is itself a not-yet-consumed bignum_temps entry (a
+        // fresh intermediate result from a binary/unary op, or a
+        // bignum-returning call) -- nothing else holds a reference to it
+        // -- and its actual precision matches the target exactly, storing
+        // it doesn't need a real copy at all: adopt the existing handle
+        // directly instead of allocating a new one and running
+        // bignum_set_d/set_str/copy just to duplicate data that's about
+        // to be thrown away anyway. Removed from bignum_temps so the
+        // end-of-statement drain doesn't free out from under whatever now
+        // owns it. Skipped when the precision doesn't match (most
+        // commonly: storing a call's bignum result into a variable
+        // declared at a different precision) -- that genuinely needs a
+        // real copy/conversion, same as before.
+        if let Type::BigNum(target_precision) = ty {
+            if let Some(idx) = self.bignum_temps.iter().position(|(_, v, p)| *v == value && *p == target_precision) {
+                self.bignum_temps.remove(idx);
+                return Ok(value);
+            }
+        }
+
         Ok(self.coerce_to_type(value, ty))
     }
 
@@ -1288,23 +1314,27 @@ impl<'ctx> Codegen<'ctx> {
                 // Coerced (via compile_and_coerce, so a bare bignum literal
                 // still gets its full precision) to the function's
                 // declared return type *before* anything below gets freed.
-                // For bignum this always makes an independent copy (same
-                // as storing into any variable or argument already does)
-                // -- which means whatever the source was (a named
-                // variable, a computed bignum_temps intermediate) is safe
-                // to free unconditionally afterward, since the coerced
-                // copy never aliases it. This also closes the old
-                // Expr::Call bignum leak: a caller now always receives its
-                // own fresh handle, never one it has to guess whether it
-                // owns.
+                // For bignum this either makes an independent copy or (if
+                // the source was itself a not-yet-consumed bignum_temps
+                // entry at the exact right precision) adopts that handle
+                // directly, removing it from bignum_temps -- either way,
+                // whatever the source was (a named variable, a computed
+                // intermediate) is safe to handle unconditionally
+                // afterward: a named variable's value was never aliased by
+                // the copy, and an adopted temp is already gone from
+                // bignum_temps by the time the drain below runs, so it's
+                // not freed out from under the value being returned. This
+                // also closes the old Expr::Call bignum leak: a caller now
+                // always receives its own handle, never one it has to
+                // guess whether it owns.
                 let return_ty = self.current_return_type;
                 let coerced = match expr {
                     Some(e) => Some(self.compile_and_coerce(e, return_ty)?),
                     None => None,
                 };
 
-                let temps: Vec<(PointerValue<'ctx>, BasicValueEnum<'ctx>)> = self.bignum_temps.drain(..).collect();
-                for (ptr, _) in temps {
+                let temps: Vec<(PointerValue<'ctx>, BasicValueEnum<'ctx>, u32)> = self.bignum_temps.drain(..).collect();
+                for (ptr, _, _) in temps {
                     self.free_bignum_ptr(ptr);
                 }
                 // Same reasoning as bignum_temps above: coerce_to_type
@@ -1455,8 +1485,8 @@ impl<'ctx> Codegen<'ctx> {
         // no valid insertion point left before a terminator, but there's
         // also nothing left to free -- Return already handled it.
         if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
-            let temps: Vec<(PointerValue<'ctx>, BasicValueEnum<'ctx>)> = self.bignum_temps.drain(..).collect();
-            for (ptr, _) in temps {
+            let temps: Vec<(PointerValue<'ctx>, BasicValueEnum<'ctx>, u32)> = self.bignum_temps.drain(..).collect();
+            for (ptr, _, _) in temps {
                 self.free_bignum_ptr(ptr);
             }
             let str_temps: Vec<PointerValue<'ctx>> = self.str_temps.drain(..).collect();
@@ -1507,14 +1537,14 @@ impl<'ctx> Codegen<'ctx> {
                         // adopts this handle, so the enclosing statement
                         // frees it once it's done being consumed.
                         let wrapped = self.wrap_bignum_ptr(dst);
-                        self.bignum_temps.push((dst, wrapped));
+                        self.bignum_temps.push((dst, wrapped, DEFAULT_BIGNUM_PRECISION));
                         wrapped
                     }
                     (UnOp::Factorial, v @ BasicValueEnum::StructValue(_)) => {
                         let src = self.unwrap_bignum_ptr(v);
                         let dst = self.compile_bignum_factorial(src);
                         let wrapped = self.wrap_bignum_ptr(dst);
-                        self.bignum_temps.push((dst, wrapped));
+                        self.bignum_temps.push((dst, wrapped, DEFAULT_BIGNUM_PRECISION));
                         wrapped
                     }
                     (op, other) => panic!("unary {op:?} not supported on {other:?}"),
@@ -1547,13 +1577,13 @@ impl<'ctx> Codegen<'ctx> {
                     (BasicValueEnum::StructValue(_), BasicValueEnum::FloatValue(f)) => {
                         let coerced = self.coerce_to_bignum(f.into(), DEFAULT_BIGNUM_PRECISION);
                         let ptr = self.unwrap_bignum_ptr(coerced);
-                        self.bignum_temps.push((ptr, coerced));
+                        self.bignum_temps.push((ptr, coerced, DEFAULT_BIGNUM_PRECISION));
                         (l, coerced)
                     }
                     (BasicValueEnum::FloatValue(f), BasicValueEnum::StructValue(_)) => {
                         let coerced = self.coerce_to_bignum(f.into(), DEFAULT_BIGNUM_PRECISION);
                         let ptr = self.unwrap_bignum_ptr(coerced);
-                        self.bignum_temps.push((ptr, coerced));
+                        self.bignum_temps.push((ptr, coerced, DEFAULT_BIGNUM_PRECISION));
                         (coerced, r)
                     }
                     other => other,
@@ -1670,7 +1700,7 @@ impl<'ctx> Codegen<'ctx> {
                         // adopts this handle, so it's registered for the
                         // enclosing statement to free once it's done with it.
                         let wrapped = self.wrap_bignum_ptr(dst);
-                        self.bignum_temps.push((dst, wrapped));
+                        self.bignum_temps.push((dst, wrapped, DEFAULT_BIGNUM_PRECISION));
                         wrapped
                     }
                     (BasicValueEnum::StructValue(_), BasicValueEnum::StructValue(_)) => {
@@ -1692,7 +1722,7 @@ impl<'ctx> Codegen<'ctx> {
                         // it. Registered here so the end of whichever
                         // statement this expression is part of can free it.
                         let wrapped = self.wrap_bignum_ptr(dst);
-                        self.bignum_temps.push((dst, wrapped));
+                        self.bignum_temps.push((dst, wrapped, DEFAULT_BIGNUM_PRECISION));
                         wrapped
                     }
                     (l, r) => panic!("binary {op:?} used with mismatched operand types {l:?} / {r:?}"),
@@ -1774,9 +1804,9 @@ impl<'ctx> Codegen<'ctx> {
             .collect::<Result<_, String>>()?;
         let call = self.builder.build_call(function, &arg_values, "call").unwrap();
         let result = call.try_as_basic_value().basic();
-        if let (Type::BigNum(_), Some(result)) = (return_type, result) {
+        if let (Type::BigNum(precision), Some(result)) = (return_type, result) {
             let ptr = self.unwrap_bignum_ptr(result);
-            self.bignum_temps.push((ptr, result));
+            self.bignum_temps.push((ptr, result, precision));
         }
         if let (Type::Str, Some(result)) = (return_type, result) {
             self.str_temps.push(result.into_pointer_value());
