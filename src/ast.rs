@@ -26,6 +26,14 @@ pub enum Type {
     /// own type purely for clarity at the type-system level, the same
     /// relationship `NumW` has to `Num`.
     File,
+    /// A genuine whole-number type -- a real 64-bit integer at the LLVM
+    /// level (not a float with a rule bolted on, unlike `Num`/`NumW`), so
+    /// arithmetic is exact and `/` truncates rather than producing a
+    /// fraction. No `[precision:N]` yet -- a single fixed 64-bit width.
+    /// Doesn't coerce from `Num`/`NumW`/`BigNum` (only from `Int` itself,
+    /// like `Bool`) -- a fractional value ever ending up in an `Int` is
+    /// exactly what this type exists to rule out.
+    Int,
     /// A growable, homogeneous array of `ElementType`. Flat (not `Box`ed
     /// or recursive) specifically so `Type` can stay `Copy` -- no arrays
     /// of arrays for this first version, only scalar element types.
@@ -45,6 +53,7 @@ pub enum ElementType {
     Str,
     BigNum(u32),
     File,
+    Int,
 }
 
 impl ElementType {
@@ -56,6 +65,7 @@ impl ElementType {
             ElementType::Str => Type::Str,
             ElementType::BigNum(p) => Type::BigNum(p),
             ElementType::File => Type::File,
+            ElementType::Int => Type::Int,
         }
     }
 
@@ -70,6 +80,7 @@ impl ElementType {
             Type::Str => Some(ElementType::Str),
             Type::BigNum(p) => Some(ElementType::BigNum(p)),
             Type::File => Some(ElementType::File),
+            Type::Int => Some(ElementType::Int),
             Type::Array(_) | Type::Void => None,
         }
     }
@@ -95,6 +106,7 @@ impl std::fmt::Display for Type {
             Type::Str => write!(f, "str"),
             Type::BigNum(p) => write!(f, "bignum[precision:{p}]"),
             Type::File => write!(f, "file"),
+            Type::Int => write!(f, "int"),
             Type::Array(elem) => write!(f, "array:{elem}"),
             Type::Void => write!(f, "void"),
         }

@@ -1,0 +1,5 @@
+START
+var:int 'a' = (5000000000);
+print*"about to overflow"*;
+print*(ref:var:int 'a') x (ref:var:int 'a')*;
+END

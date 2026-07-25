@@ -98,6 +98,7 @@ fn main() {
         .arg(env!("CYBORGPL_IO_LIB")) // our stdin shim, for input:str/input:num
         .arg(env!("CYBORGPL_CLOCK_LIB")) // our clock shim, for clock:num
         .arg(env!("CYBORGPL_ARRAY_LIB")) // our array shim, for var:array:TYPE
+        .arg(env!("CYBORGPL_INT_LIB")) // our int shim, for var:int overflow/div-by-zero crashes
         .status()
         .expect("failed to invoke cc");
     if !status.success() {

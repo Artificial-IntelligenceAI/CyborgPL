@@ -64,4 +64,12 @@ fn main() {
         .compile("cyborgpl_array");
     println!("cargo:rustc-env=CYBORGPL_ARRAY_LIB={out_dir}/libcyborgpl_array.a");
     println!("cargo:rerun-if-changed=runtime/array/array_shim.c");
+
+    cc::Build::new()
+        .file("runtime/int/int_shim.c")
+        .opt_level(2)
+        .flag("-mmacosx-version-min=26.0")
+        .compile("cyborgpl_int");
+    println!("cargo:rustc-env=CYBORGPL_INT_LIB={out_dir}/libcyborgpl_int.a");
+    println!("cargo:rerun-if-changed=runtime/int/int_shim.c");
 }

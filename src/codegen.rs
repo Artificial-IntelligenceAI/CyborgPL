@@ -7,10 +7,25 @@ use inkwell::module::{Linkage, Module};
 use inkwell::passes::PassBuilderOptions;
 use inkwell::targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine};
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FloatType, StructType};
-use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FloatValue, FunctionValue, PointerValue};
+use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FloatValue, FunctionValue, IntValue, PointerValue};
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel};
 
 use crate::ast::*;
+
+/// Parses an `int` literal's original digit text directly, rather than
+/// going through the lexer's already-lossy `f64` (`n`, exact only up to
+/// 2^53) -- the same "read the original digits, not the lossy float"
+/// fix `bignum`'s own bare-literal case needed. Falls back to `n as i64`
+/// only when `text` doesn't parse as a bare integer (e.g. a redundant
+/// `"5.0"` -- the type checker has already confirmed the *value* is
+/// whole by this point, so the fallback is exact for any text shaped
+/// like that in practice). Doesn't handle the one literal that can't be
+/// written positively and negated (`i64::MIN`, whose positive form
+/// already exceeds `i64::MAX`) -- a narrow, known limitation shared with
+/// most C-like languages' own `INT_MIN` literal quirk.
+fn parse_int_literal(text: &str, n: f64) -> i64 {
+    text.parse::<i64>().unwrap_or(n as i64)
+}
 
 /// The GMP shim functions (runtime/gmp/bignum_shim.c) backing `bignum`.
 struct BignumFns<'ctx> {
@@ -155,6 +170,16 @@ pub struct Codegen<'ctx> {
     array_append_fn: FunctionValue<'ctx>,
     array_get_ptr_fn: FunctionValue<'ctx>,
     array_length_fn: FunctionValue<'ctx>,
+    /// runtime/int/int_shim.c -- the single shared crash-with-message
+    /// path backing every "int can't represent this result" case
+    /// (overflowing +/-/x/xx/xxx/!, division by zero, negating i64::MIN).
+    int_die_fn: FunctionValue<'ctx>,
+    /// `llvm.s{add,sub,mul}.with.overflow.i64` -- each returns `{i64,
+    /// i1}` (result, did-it-overflow), letting int's arithmetic detect
+    /// overflow directly instead of silently wrapping (two's-complement).
+    sadd_overflow_fn: FunctionValue<'ctx>,
+    ssub_overflow_fn: FunctionValue<'ctx>,
+    smul_overflow_fn: FunctionValue<'ctx>,
     bignum: BignumFns<'ctx>,
 }
 
@@ -230,6 +255,24 @@ impl<'ctx> Codegen<'ctx> {
 
         let array_length_type = array_i64_ty.fn_type(&[i8_ptr.into()], false);
         let array_length_fn = module.add_function("cyborg_array_length", array_length_type, Some(Linkage::External));
+
+        // runtime/int/int_shim.c
+        let int_die_type = context.void_type().fn_type(&[i8_ptr.into()], false);
+        let int_die_fn = module.add_function("cyborg_int_die", int_die_type, Some(Linkage::External));
+
+        // LLVM's overflow-checked arithmetic intrinsics -- declared with
+        // their exact mangled names and a `{i64, i1}` (result, overflowed)
+        // return type, the same way a hand-written .ll file would; no
+        // special "intrinsic" API needed beyond declaring the right
+        // name/signature and calling it like any other function.
+        let overflow_result_ty = context.struct_type(&[i64_type.into(), context.bool_type().into()], false);
+        let overflow_fn_type = overflow_result_ty.fn_type(&[i64_type.into(), i64_type.into()], false);
+        let sadd_overflow_fn =
+            module.add_function("llvm.sadd.with.overflow.i64", overflow_fn_type, Some(Linkage::External));
+        let ssub_overflow_fn =
+            module.add_function("llvm.ssub.with.overflow.i64", overflow_fn_type, Some(Linkage::External));
+        let smul_overflow_fn =
+            module.add_function("llvm.smul.with.overflow.i64", overflow_fn_type, Some(Linkage::External));
 
         // runtime/gmp/bignum_shim.c -- every handle is an opaque i8_ptr, so
         // these signatures are the same shape regardless of what GMP itself
@@ -335,6 +378,10 @@ impl<'ctx> Codegen<'ctx> {
             array_append_fn,
             array_get_ptr_fn,
             array_length_fn,
+            int_die_fn,
+            sadd_overflow_fn,
+            ssub_overflow_fn,
+            smul_overflow_fn,
             bignum,
         }
     }
@@ -383,6 +430,7 @@ impl<'ctx> Codegen<'ctx> {
             Type::Num(width) => self.float_type_for(width).into(),
             Type::NumW(width) => self.float_type_for(width).into(),
             Type::Bool => self.context.bool_type().into(),
+            Type::Int => self.context.i64_type().into(),
             Type::Str | Type::File => self.context.ptr_type(AddressSpace::default()).into(),
             // Same wrapped-pointer shape as `BigNum` -- reused directly,
             // not a second copy of the same trick. Structurally identical
@@ -554,6 +602,39 @@ impl<'ctx> Codegen<'ctx> {
         if let (Expr::ArrayLiteral(elements), Type::Array(elem)) = (expr, ty) {
             return self.compile_array_literal(elements, elem);
         }
+        // A bare numeric literal assigned to `int` needs a real i64
+        // constant, not the f64 `compile_expr`'s generic `Expr::Num` arm
+        // always produces. Parses `text` directly rather than going
+        // through the already-lossy `n` (an `f64`, exact only up to
+        // 2^53) -- the same "read the original digits, not the lexer's
+        // lossy float" fix `bignum`'s bare-literal case already needed.
+        if let (Expr::Num(n, text), Type::Int) = (expr, ty) {
+            return Ok(self.context.i64_type().const_int(parse_int_literal(text, *n) as u64, true).into());
+        }
+        // Propagate an `int` target into a binary/unary expression's own
+        // operands too -- mirrors typecheck.rs's identical propagation
+        // exactly (see there for why: `var:int 'c' = (2) xx (10);` has
+        // neither operand already known as `int` on its own, so
+        // compile_expr's own Binary-arm literal-pairing check -- which
+        // only fires when the *other* operand is already int-shaped --
+        // would never trigger, and both literals would compile as f64.
+        // The type checker has already confirmed this is well-typed by
+        // the time codegen runs, so `.into_int_value()` below is safe.
+        if let (Expr::Binary(lhs, op, rhs), Type::Int) = (expr, ty) {
+            if *op != BinOp::Concat {
+                let l = self.compile_and_coerce(lhs, Type::Int)?.into_int_value();
+                let r = self.compile_and_coerce(rhs, Type::Int)?.into_int_value();
+                return Ok(self.compile_binary_int_op(*op, l, r));
+            }
+        }
+        if let (Expr::Unary(op, inner), Type::Int) = (expr, ty) {
+            let iv = self.compile_and_coerce(inner, Type::Int)?.into_int_value();
+            return Ok(match op {
+                UnOp::Neg => self.compile_int_neg(iv).into(),
+                UnOp::Factorial => self.compile_int_factorial(iv).into(),
+                UnOp::Not => panic!("Not on int should have been rejected by the type checker"),
+            });
+        }
         let value = self.compile_expr(expr)?;
 
         // If `value` is itself a not-yet-consumed bignum_temps entry (a
@@ -577,6 +658,22 @@ impl<'ctx> Codegen<'ctx> {
         }
 
         Ok(self.coerce_to_type(value, ty))
+    }
+
+    /// Compiles a bare numeric literal (`text`/`n`) that's paired, in a
+    /// binary op, with an already-compiled `other` operand -- as an i64
+    /// constant (parsed from `text` directly, same precision reasoning as
+    /// the bare-literal case in `compile_and_coerce`) if `other` is
+    /// genuinely `int` (a 64-bit `IntValue`, not `bool`'s i1), otherwise
+    /// as the usual f64. The type checker has already confirmed the
+    /// literal is a whole number whenever this produces `int`.
+    fn compile_literal_paired_with(&self, text: &str, n: f64, other: &BasicValueEnum<'ctx>) -> BasicValueEnum<'ctx> {
+        if let BasicValueEnum::IntValue(iv) = other {
+            if iv.get_type().get_bit_width() == 64 {
+                return self.context.i64_type().const_int(parse_int_literal(text, n) as u64, true).into();
+            }
+        }
+        self.context.f64_type().const_float(n).into()
     }
 
     /// Builds a fresh array from `{(v1), (v2), ...}`, appending each
@@ -678,7 +775,7 @@ impl<'ctx> Codegen<'ctx> {
                 .basic()
                 .unwrap(),
             ElementType::BigNum(precision) => self.coerce_to_bignum(loaded, precision),
-            ElementType::Num(_) | ElementType::NumW(_) | ElementType::Bool => loaded,
+            ElementType::Num(_) | ElementType::NumW(_) | ElementType::Bool | ElementType::Int => loaded,
         };
         let value_slot = self.entry_alloca(elem_llvm_ty, "array_copy_value_slot");
         self.builder.build_store(value_slot, to_append).unwrap();
@@ -808,7 +905,7 @@ impl<'ctx> Codegen<'ctx> {
         match elem {
             ElementType::Str | ElementType::File => self.free_array_str_elements(handle),
             ElementType::BigNum(_) => self.free_array_bignum_elements(handle),
-            ElementType::Num(_) | ElementType::NumW(_) | ElementType::Bool => {}
+            ElementType::Num(_) | ElementType::NumW(_) | ElementType::Bool | ElementType::Int => {}
         }
         self.builder.build_call(self.array_free_fn, &[handle.into()], "array_free_call").unwrap();
     }
@@ -966,6 +1063,7 @@ impl<'ctx> Codegen<'ctx> {
             Type::Num(width) => self.float_type_for(width).fn_type(&param_types, false),
             Type::NumW(width) => self.float_type_for(width).fn_type(&param_types, false),
             Type::Bool => self.context.bool_type().fn_type(&param_types, false),
+            Type::Int => self.context.i64_type().fn_type(&param_types, false),
             Type::Str | Type::File => self.context.ptr_type(AddressSpace::default()).fn_type(&param_types, false),
             Type::BigNum(_) | Type::Array(_) => self.bignum_struct_type().fn_type(&param_types, false),
             Type::Void => self.context.void_type().fn_type(&param_types, false),
@@ -1053,6 +1151,10 @@ impl<'ctx> Codegen<'ctx> {
                 }
                 Type::Bool => {
                     let zero = self.context.bool_type().const_int(0, false);
+                    self.builder.build_return(Some(&zero)).unwrap();
+                }
+                Type::Int => {
+                    let zero = self.context.i64_type().const_int(0, true);
                     self.builder.build_return(Some(&zero)).unwrap();
                 }
                 Type::Str | Type::File => {
@@ -1291,7 +1393,7 @@ impl<'ctx> Codegen<'ctx> {
                         let old_ptr = self.unwrap_bignum_ptr(old_wrapped);
                         self.free_bignum_ptr(old_ptr);
                     }
-                    ElementType::Num(_) | ElementType::NumW(_) | ElementType::Bool => {}
+                    ElementType::Num(_) | ElementType::NumW(_) | ElementType::Bool | ElementType::Int => {}
                 }
 
                 self.builder.build_store(slot_ptr, new_value).unwrap();
@@ -1518,8 +1620,19 @@ impl<'ctx> Codegen<'ctx> {
                     (UnOp::Neg, BasicValueEnum::FloatValue(f)) => {
                         self.builder.build_float_neg(f, "neg").unwrap().into()
                     }
-                    (UnOp::Not, BasicValueEnum::IntValue(i)) => {
+                    // Both `bool` (i1) and `int` (i64) are `IntValue` in
+                    // inkwell regardless of width -- bit width tells them
+                    // apart, same technique used throughout this file for
+                    // the same reason (value_fmt, the binary-op dispatch
+                    // below).
+                    (UnOp::Not, BasicValueEnum::IntValue(i)) if i.get_type().get_bit_width() == 1 => {
                         self.builder.build_not(i, "not").unwrap().into()
+                    }
+                    (UnOp::Neg, BasicValueEnum::IntValue(i)) if i.get_type().get_bit_width() == 64 => {
+                        self.compile_int_neg(i).into()
+                    }
+                    (UnOp::Factorial, BasicValueEnum::IntValue(i)) if i.get_type().get_bit_width() == 64 => {
+                        self.compile_int_factorial(i).into()
                     }
                     (UnOp::Factorial, BasicValueEnum::FloatValue(f)) => {
                         // Same simplification pow/tetration already make:
@@ -1551,8 +1664,27 @@ impl<'ctx> Codegen<'ctx> {
                 }
             }
             Expr::Binary(lhs, op, rhs) => {
-                let l = self.compile_expr(lhs)?;
-                let r = self.compile_expr(rhs)?;
+                // A bare literal paired with an `int` operand compiles as
+                // an i64 constant directly, not the f64 the generic
+                // `Expr::Num` arm would otherwise produce -- mirrors
+                // typecheck.rs's identical structural pre-check exactly
+                // (the type checker already guarantees the literal is a
+                // whole number whenever this resolves to `int`). Both
+                // sides being bare literals is unaffected -- still
+                // compiles as float/float, same as before.
+                let (l, r) = match (lhs.as_ref(), rhs.as_ref()) {
+                    (Expr::Num(n, text), other) if !matches!(other, Expr::Num(_, _)) => {
+                        let r = self.compile_expr(rhs)?;
+                        let l = self.compile_literal_paired_with(text, *n, &r);
+                        (l, r)
+                    }
+                    (other, Expr::Num(n, text)) if !matches!(other, Expr::Num(_, _)) => {
+                        let l = self.compile_expr(lhs)?;
+                        let r = self.compile_literal_paired_with(text, *n, &l);
+                        (l, r)
+                    }
+                    _ => (self.compile_expr(lhs)?, self.compile_expr(rhs)?),
+                };
                 // `stch` accepts any shape on either side (auto-converting
                 // to display text the same way print does) and never
                 // widens/promotes its operands -- handle it before any of
@@ -1644,6 +1776,19 @@ impl<'ctx> Codegen<'ctx> {
                         BinOp::And | BinOp::Or => panic!("{op:?} requires bool operands, not num"),
                         BinOp::Concat => unreachable!("Concat is handled earlier, before this match"),
                     },
+                    // int (i64) arithmetic -- distinct from the i1
+                    // bool-logic arm right below (both are `IntValue` in
+                    // inkwell regardless of width). Every arithmetic op
+                    // is overflow-checked, crashing with a clear message
+                    // rather than silently wrapping (two's-complement) --
+                    // the same "loud failure over silent wrong data"
+                    // precedent as an out-of-range array index or invalid
+                    // `input:num` text.
+                    (BasicValueEnum::IntValue(li), BasicValueEnum::IntValue(ri))
+                        if li.get_type().get_bit_width() == 64 =>
+                    {
+                        self.compile_binary_int_op(*op, li, ri)
+                    }
                     (BasicValueEnum::IntValue(li), BasicValueEnum::IntValue(ri)) => match op {
                         BinOp::Eq => self.builder.build_int_compare(IntPredicate::EQ, li, ri, "eq").unwrap().into(),
                         BinOp::Ne => self.builder.build_int_compare(IntPredicate::NE, li, ri, "ne").unwrap().into(),
@@ -1890,12 +2035,16 @@ impl<'ctx> Codegen<'ctx> {
             // have to do explicitly since LLVM won't do it for us).
             BasicValueEnum::FloatValue(f) => ("%g", self.coerce_float(f, 64).into(), None),
             BasicValueEnum::PointerValue(p) => ("%s", p.into(), None),
-            BasicValueEnum::IntValue(i) => {
-                // Only bools (i1) reach here. The actual value is only known
-                // at runtime (it could come from a comparison, a variable,
-                // anything), so picking "true" vs "false" text needs a
-                // runtime select between the two string constants, not a
-                // compile-time choice.
+            // Both `bool` (i1) and `int` (i64) are `IntValue` in inkwell
+            // regardless of width -- bit width is what actually tells
+            // them apart here, the same technique `float_bit_width`
+            // already uses to distinguish num's precisions.
+            BasicValueEnum::IntValue(i) if i.get_type().get_bit_width() == 1 => {
+                // The actual value is only known at runtime (it could
+                // come from a comparison, a variable, anything), so
+                // picking "true" vs "false" text needs a runtime select
+                // between the two string constants, not a compile-time
+                // choice.
                 let true_str = self.builder.build_global_string_ptr("true", "true_str").unwrap();
                 let false_str = self.builder.build_global_string_ptr("false", "false_str").unwrap();
                 let chosen = self
@@ -1904,6 +2053,7 @@ impl<'ctx> Codegen<'ctx> {
                     .unwrap();
                 ("%s", chosen.into(), None)
             }
+            BasicValueEnum::IntValue(i) => ("%lld", i.into(), None),
             BasicValueEnum::StructValue(_) => {
                 let ptr = self.unwrap_bignum_ptr(value);
                 let str_ptr = self
@@ -1980,6 +2130,221 @@ impl<'ctx> Codegen<'ctx> {
         }
 
         buffer
+    }
+
+    /// int's binary-op dispatch -- shared by `compile_expr`'s normal
+    /// `Expr::Binary` handling and `compile_and_coerce`'s propagation of
+    /// an `int` target into a binary expression's own bare-literal
+    /// operands (see there for why that's needed). Every arithmetic op
+    /// is overflow-checked, crashing with a clear message rather than
+    /// silently wrapping (two's-complement) -- the same "loud failure
+    /// over silent wrong data" precedent as an out-of-range array index
+    /// or invalid `input:num` text.
+    fn compile_binary_int_op(&self, op: BinOp, li: IntValue<'ctx>, ri: IntValue<'ctx>) -> BasicValueEnum<'ctx> {
+        match op {
+            BinOp::Add | BinOp::Sub | BinOp::Mul => self.checked_int_arith(op, li, ri).into(),
+            BinOp::Div => self.compile_int_div(li, ri).into(),
+            BinOp::Pow => self.compile_int_pow(li, ri).into(),
+            BinOp::Tetration => self.compile_int_tetration(li, ri).into(),
+            BinOp::Eq => self.builder.build_int_compare(IntPredicate::EQ, li, ri, "eq").unwrap().into(),
+            BinOp::Ne => self.builder.build_int_compare(IntPredicate::NE, li, ri, "ne").unwrap().into(),
+            BinOp::Lt => self.builder.build_int_compare(IntPredicate::SLT, li, ri, "lt").unwrap().into(),
+            BinOp::Gt => self.builder.build_int_compare(IntPredicate::SGT, li, ri, "gt").unwrap().into(),
+            BinOp::Le => self.builder.build_int_compare(IntPredicate::SLE, li, ri, "le").unwrap().into(),
+            BinOp::Ge => self.builder.build_int_compare(IntPredicate::SGE, li, ri, "ge").unwrap().into(),
+            BinOp::And | BinOp::Or => panic!("{op:?} requires bool operands, not int"),
+            BinOp::Concat => unreachable!("Concat is handled earlier, before this match"),
+        }
+    }
+
+    /// Branches to a call to `cyborg_int_die(message)` when `cond` (an
+    /// i1) is true, otherwise falls through to a fresh block right after
+    /// -- the shared shape every int-specific crash check (overflow,
+    /// division by zero, negating `i64::MIN`) uses.
+    fn crash_if(&self, cond: IntValue<'ctx>, message: &str) {
+        let function = self.current_function();
+        let crash_bb = self.context.append_basic_block(function, "int_crash");
+        let continue_bb = self.context.append_basic_block(function, "int_continue");
+        self.builder.build_conditional_branch(cond, crash_bb, continue_bb).unwrap();
+
+        self.builder.position_at_end(crash_bb);
+        let msg_ptr = self.builder.build_global_string_ptr(message, "int_crash_msg").unwrap().as_pointer_value();
+        self.builder.build_call(self.int_die_fn, &[msg_ptr.into()], "int_die_call").unwrap();
+        self.builder.build_unreachable().unwrap();
+
+        self.builder.position_at_end(continue_bb);
+    }
+
+    /// Overflow-checked signed 64-bit `+`/`-`/`x`, crashing with a clear
+    /// message if the true result doesn't fit in 64 bits -- rather than
+    /// silently wrapping (two's-complement), which is what a plain LLVM
+    /// `add`/`sub`/`mul` would do.
+    fn checked_int_arith(&self, op: BinOp, li: IntValue<'ctx>, ri: IntValue<'ctx>) -> IntValue<'ctx> {
+        let (fn_val, op_name) = match op {
+            BinOp::Add => (self.sadd_overflow_fn, "+"),
+            BinOp::Sub => (self.ssub_overflow_fn, "-"),
+            BinOp::Mul => (self.smul_overflow_fn, "x"),
+            _ => panic!("checked_int_arith called with non-arithmetic op {op:?}"),
+        };
+        let result_struct = self
+            .builder
+            .build_call(fn_val, &[li.into(), ri.into()], "int_op_call")
+            .unwrap()
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_struct_value();
+        let result = self.builder.build_extract_value(result_struct, 0, "int_op_result").unwrap().into_int_value();
+        let overflowed =
+            self.builder.build_extract_value(result_struct, 1, "int_op_overflowed").unwrap().into_int_value();
+        self.crash_if(overflowed, &format!("int overflow: result of {op_name} doesn't fit in int"));
+        result
+    }
+
+    /// Signed `/`, guarding the two ways it can go wrong that a plain
+    /// LLVM `sdiv` wouldn't catch on its own: dividing by zero (undefined
+    /// behavior at the LLVM level, a hardware trap at runtime), and
+    /// `i64::MIN / -1` (the one signed-division case that overflows,
+    /// since the true result, `i64::MAX + 1`, doesn't fit).
+    fn compile_int_div(&self, li: IntValue<'ctx>, ri: IntValue<'ctx>) -> IntValue<'ctx> {
+        let i64_ty = self.context.i64_type();
+        let zero = i64_ty.const_int(0, true);
+        let is_zero = self.builder.build_int_compare(IntPredicate::EQ, ri, zero, "int_div_zero_check").unwrap();
+        self.crash_if(is_zero, "int division by zero");
+
+        let int_min = i64_ty.const_int(i64::MIN as u64, true);
+        let neg_one = i64_ty.const_int((-1i64) as u64, true);
+        let is_int_min = self.builder.build_int_compare(IntPredicate::EQ, li, int_min, "int_div_min_check").unwrap();
+        let is_neg_one = self.builder.build_int_compare(IntPredicate::EQ, ri, neg_one, "int_div_negone_check").unwrap();
+        let is_overflow_case = self.builder.build_and(is_int_min, is_neg_one, "int_div_overflow_check").unwrap();
+        self.crash_if(is_overflow_case, "int overflow: i64::MIN / -1 doesn't fit in int");
+
+        self.builder.build_int_signed_div(li, ri, "int_div").unwrap()
+    }
+
+    /// Negation, guarding the one value whose negation overflows:
+    /// `i64::MIN` (its true negation, `i64::MAX + 1`, doesn't fit).
+    fn compile_int_neg(&self, i: IntValue<'ctx>) -> IntValue<'ctx> {
+        let i64_ty = self.context.i64_type();
+        let int_min = i64_ty.const_int(i64::MIN as u64, true);
+        let is_int_min = self.builder.build_int_compare(IntPredicate::EQ, i, int_min, "int_neg_min_check").unwrap();
+        self.crash_if(is_int_min, "int overflow: negating i64::MIN doesn't fit in int");
+        self.builder.build_int_neg(i, "int_neg").unwrap()
+    }
+
+    /// `xx` on `int`: real integer exponentiation via repeated
+    /// overflow-checked multiplication (a genuine runtime loop, mirroring
+    /// `compile_tetration`'s shape below), not a float `pow()`
+    /// round-trip -- keeping the whole computation exact, matching why
+    /// `int` exists at all. A negative exponent would only ever produce
+    /// a fractional result (except for base 1/-1, not worth special-
+    /// casing), so it crashes rather than silently truncating or
+    /// promoting to float.
+    fn compile_int_pow(&self, base: IntValue<'ctx>, exponent: IntValue<'ctx>) -> IntValue<'ctx> {
+        let i64_ty = self.context.i64_type();
+        let zero = i64_ty.const_int(0, true);
+        let is_negative = self.builder.build_int_compare(IntPredicate::SLT, exponent, zero, "int_pow_neg_check").unwrap();
+        self.crash_if(is_negative, "int power requires a non-negative exponent");
+
+        let function = self.current_function();
+        let result_slot = self.entry_alloca(i64_ty.into(), "int_pow_result");
+        self.builder.build_store(result_slot, i64_ty.const_int(1, true)).unwrap();
+        let counter_slot = self.entry_alloca(i64_ty.into(), "int_pow_i");
+        self.builder.build_store(counter_slot, zero).unwrap();
+
+        let cond_bb = self.context.append_basic_block(function, "int_pow_cond");
+        let body_bb = self.context.append_basic_block(function, "int_pow_body");
+        let end_bb = self.context.append_basic_block(function, "int_pow_end");
+        self.builder.build_unconditional_branch(cond_bb).unwrap();
+
+        self.builder.position_at_end(cond_bb);
+        let counter = self.builder.build_load(i64_ty, counter_slot, "int_pow_i_load").unwrap().into_int_value();
+        let keep_going = self.builder.build_int_compare(IntPredicate::SLT, counter, exponent, "int_pow_test").unwrap();
+        self.builder.build_conditional_branch(keep_going, body_bb, end_bb).unwrap();
+
+        self.builder.position_at_end(body_bb);
+        let current = self.builder.build_load(i64_ty, result_slot, "int_pow_result_load").unwrap().into_int_value();
+        let next = self.checked_int_arith(BinOp::Mul, current, base);
+        self.builder.build_store(result_slot, next).unwrap();
+        let counter_next = self.builder.build_int_add(counter, i64_ty.const_int(1, true), "int_pow_i_next").unwrap();
+        self.builder.build_store(counter_slot, counter_next).unwrap();
+        self.builder.build_unconditional_branch(cond_bb).unwrap();
+
+        self.builder.position_at_end(end_bb);
+        self.builder.build_load(i64_ty, result_slot, "int_pow_final").unwrap().into_int_value()
+    }
+
+    /// `xxx` on `int`: same shape as `compile_tetration` below (height
+    /// copies of `base`, only known at runtime) but calling
+    /// `compile_int_pow` at each step instead of libm's `pow` -- real
+    /// integer exponentiation throughout, so overflow is caught exactly
+    /// (tetration grows astronomically fast, so this crashes almost
+    /// immediately for any base/height beyond the smallest values, which
+    /// is the correct behavior, not a bug).
+    fn compile_int_tetration(&self, base: IntValue<'ctx>, height: IntValue<'ctx>) -> IntValue<'ctx> {
+        let function = self.current_function();
+        let i64_ty = self.context.i64_type();
+
+        let result_slot = self.entry_alloca(i64_ty.into(), "int_tet_result");
+        self.builder.build_store(result_slot, base).unwrap();
+        let counter_slot = self.entry_alloca(i64_ty.into(), "int_tet_i");
+        self.builder.build_store(counter_slot, i64_ty.const_int(2, true)).unwrap();
+
+        let cond_bb = self.context.append_basic_block(function, "int_tet_cond");
+        let body_bb = self.context.append_basic_block(function, "int_tet_body");
+        let end_bb = self.context.append_basic_block(function, "int_tet_end");
+        self.builder.build_unconditional_branch(cond_bb).unwrap();
+
+        self.builder.position_at_end(cond_bb);
+        let counter = self.builder.build_load(i64_ty, counter_slot, "int_tet_i_load").unwrap().into_int_value();
+        let keep_going = self.builder.build_int_compare(IntPredicate::SLE, counter, height, "int_tet_test").unwrap();
+        self.builder.build_conditional_branch(keep_going, body_bb, end_bb).unwrap();
+
+        self.builder.position_at_end(body_bb);
+        let current = self.builder.build_load(i64_ty, result_slot, "int_tet_result_load").unwrap().into_int_value();
+        let next = self.compile_int_pow(base, current);
+        self.builder.build_store(result_slot, next).unwrap();
+        let counter_next = self.builder.build_int_add(counter, i64_ty.const_int(1, true), "int_tet_i_next").unwrap();
+        self.builder.build_store(counter_slot, counter_next).unwrap();
+        self.builder.build_unconditional_branch(cond_bb).unwrap();
+
+        self.builder.position_at_end(end_bb);
+        self.builder.build_load(i64_ty, result_slot, "int_tet_final").unwrap().into_int_value()
+    }
+
+    /// Postfix `!` on `int`: same loop shape as `compile_factorial`
+    /// below, but overflow-checked at each multiplication step --
+    /// `21!` already exceeds `i64`'s range, unlike `num`'s float version,
+    /// which just loses precision gracefully instead of overflowing.
+    fn compile_int_factorial(&self, n: IntValue<'ctx>) -> IntValue<'ctx> {
+        let function = self.current_function();
+        let i64_ty = self.context.i64_type();
+
+        let result_slot = self.entry_alloca(i64_ty.into(), "int_fact_result");
+        self.builder.build_store(result_slot, i64_ty.const_int(1, true)).unwrap();
+        let counter_slot = self.entry_alloca(i64_ty.into(), "int_fact_i");
+        self.builder.build_store(counter_slot, i64_ty.const_int(2, true)).unwrap();
+
+        let cond_bb = self.context.append_basic_block(function, "int_fact_cond");
+        let body_bb = self.context.append_basic_block(function, "int_fact_body");
+        let end_bb = self.context.append_basic_block(function, "int_fact_end");
+        self.builder.build_unconditional_branch(cond_bb).unwrap();
+
+        self.builder.position_at_end(cond_bb);
+        let counter = self.builder.build_load(i64_ty, counter_slot, "int_fact_i_load").unwrap().into_int_value();
+        let keep_going = self.builder.build_int_compare(IntPredicate::SLE, counter, n, "int_fact_test").unwrap();
+        self.builder.build_conditional_branch(keep_going, body_bb, end_bb).unwrap();
+
+        self.builder.position_at_end(body_bb);
+        let current = self.builder.build_load(i64_ty, result_slot, "int_fact_result_load").unwrap().into_int_value();
+        let next = self.checked_int_arith(BinOp::Mul, current, counter);
+        self.builder.build_store(result_slot, next).unwrap();
+        let counter_next = self.builder.build_int_add(counter, i64_ty.const_int(1, true), "int_fact_i_next").unwrap();
+        self.builder.build_store(counter_slot, counter_next).unwrap();
+        self.builder.build_unconditional_branch(cond_bb).unwrap();
+
+        self.builder.position_at_end(end_bb);
+        self.builder.build_load(i64_ty, result_slot, "int_fact_final").unwrap().into_int_value()
     }
 
     /// `xxx`: a xxx b = a ^ (a ^ (a ^ ... )) with `b` copies of `a`. `b` is

@@ -20,7 +20,7 @@ use crate::ast::*;
 #[derive(Clone, Copy, PartialEq)]
 enum Shape {
     Float,
-    Int,
+    Bool,
     Str,
     BigNum,
     /// Genuinely distinct from `BigNum`, even though codegen happens to
@@ -30,15 +30,24 @@ enum Shape {
     /// value getting silently confused with each other, so the two must
     /// never share a shape here.
     Array,
+    /// A genuine whole-number type -- also `IntValue` at the LLVM level,
+    /// same as `Bool`, but a real (64-bit-wide) integer rather than a
+    /// single bit, and with none of `Bool`'s boolean-logic operators.
+    /// Deliberately its own shape rather than reusing `Bool`'s, the same
+    /// reasoning as `Array` above: two genuinely different things must
+    /// never share a shape just because codegen happens to represent them
+    /// with the same underlying LLVM value kind.
+    Int,
 }
 
 fn shape_of(ty: Type) -> Shape {
     match ty {
         Type::Num(_) | Type::NumW(_) => Shape::Float,
-        Type::Bool => Shape::Int,
+        Type::Bool => Shape::Bool,
         Type::Str | Type::File => Shape::Str,
         Type::BigNum(_) => Shape::BigNum,
         Type::Array(_) => Shape::Array,
+        Type::Int => Shape::Int,
         Type::Void => panic!("Void has no runtime shape; should never reach type-checking"),
     }
 }
@@ -384,13 +393,17 @@ impl TypeChecker {
                 match (op, ity) {
                     (UnOp::Neg, Type::Num(_) | Type::NumW(_)) => Some(ity),
                     (UnOp::Neg, Type::BigNum(_)) => Some(Type::BigNum(DEFAULT_BIGNUM_PRECISION)),
+                    (UnOp::Neg, Type::Int) => Some(Type::Int),
                     (UnOp::Not, Type::Bool) => Some(Type::Bool),
                     // Both forced to a fixed result type regardless of the
                     // operand's own precision -- matches compile_factorial
                     // (always 64-bit) / compile_bignum_factorial (always
-                    // default precision) exactly.
+                    // default precision) exactly. Int factorial keeps the
+                    // operand's own (single, fixed) width -- there's only
+                    // one to keep.
                     (UnOp::Factorial, Type::Num(_) | Type::NumW(_)) => Some(Type::Num(DEFAULT_NUM_PRECISION)),
                     (UnOp::Factorial, Type::BigNum(_)) => Some(Type::BigNum(DEFAULT_BIGNUM_PRECISION)),
+                    (UnOp::Factorial, Type::Int) => Some(Type::Int),
                     (op, ity) => {
                         self.error(format!("{op} not supported on {ity}"));
                         None
@@ -398,8 +411,38 @@ impl TypeChecker {
                 }
             }
             Expr::Binary(lhs, op, rhs) => {
-                let lty = self.check_expr(lhs);
-                let rty = self.check_expr(rhs);
+                // A bare whole-number literal paired with an `int`
+                // operand is itself treated as `int` -- matching how a
+                // literal already "just works" mixed with num/numw (same
+                // runtime representation there, so no resolution is
+                // needed). `int` has a genuinely different
+                // representation, so this has to be resolved here,
+                // structurally, before the generic check_expr below
+                // (which always gives a bare `Expr::Num` type
+                // `Num(DEFAULT)`, with no way to know afterward it could
+                // have been `int` instead). Both sides being bare
+                // literals (`(1) + (2)`) is unaffected -- still defaults
+                // to `num`, since neither side is independently known as
+                // `int` without the other.
+                let (lty, rty) = match (lhs.as_ref(), rhs.as_ref()) {
+                    (Expr::Num(n, _), other) if !matches!(other, Expr::Num(_, _)) => {
+                        let rty = self.check_expr(rhs);
+                        let lty = match rty {
+                            Some(Type::Int) => self.check_whole_number_literal(*n),
+                            _ => self.check_expr(lhs),
+                        };
+                        (lty, rty)
+                    }
+                    (other, Expr::Num(n, _)) if !matches!(other, Expr::Num(_, _)) => {
+                        let lty = self.check_expr(lhs);
+                        let rty = match lty {
+                            Some(Type::Int) => self.check_whole_number_literal(*n),
+                            _ => self.check_expr(rhs),
+                        };
+                        (lty, rty)
+                    }
+                    _ => (self.check_expr(lhs), self.check_expr(rhs)),
+                };
                 let (lty, rty) = (lty?, rty?);
                 if *op == BinOp::Concat {
                     // Accepts any shape on either side, auto-converting to
@@ -449,12 +492,23 @@ impl TypeChecker {
                 }
                 BinOp::Concat => unreachable!("Concat is handled before check_binary is called"),
             },
-            (Shape::Int, Shape::Int) => match op {
+            (Shape::Bool, Shape::Bool) => match op {
                 BinOp::Eq | BinOp::Ne | BinOp::And | BinOp::Or => Some(Type::Bool),
                 _ => {
                     self.error(format!("{op} not supported on bool operands"));
                     None
                 }
+            },
+            (Shape::Int, Shape::Int) => match op {
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Pow | BinOp::Tetration => {
+                    Some(Type::Int)
+                }
+                BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => Some(Type::Bool),
+                BinOp::And | BinOp::Or => {
+                    self.error(format!("{op} requires bool operands, not int"));
+                    None
+                }
+                BinOp::Concat => unreachable!("Concat is handled before check_binary is called"),
             },
             (Shape::BigNum, Shape::BigNum) => match op {
                 BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => Some(Type::Bool),
@@ -546,6 +600,37 @@ impl TypeChecker {
     /// fine. Any other expression is unaffected, falling straight through
     /// to `check_expr`.
     fn check_expr_for(&mut self, expr: &Expr, target: Type) -> Option<Type> {
+        if let (Expr::Num(n, _), Type::Int) = (expr, target) {
+            return self.check_whole_number_literal(*n);
+        }
+        // Propagate an `int` target into a binary/unary expression's own
+        // operands too -- not just a bare literal directly assigned.
+        // `var:int 'c' = (2) xx (10);` has *neither* operand already
+        // known as `int` on its own (no variable to anchor
+        // `Expr::Binary`'s own literal-pairing check against), but the
+        // assignment target still makes the intent unambiguous. A
+        // non-literal operand (a variable, a call) is unaffected --
+        // `check_expr_for` only special-cases bare literals, so anything
+        // else still resolves to its own real type regardless of what's
+        // propagated, and a genuine mismatch (e.g. pairing a `bignum`
+        // where an `int` was expected) is still caught by `check_binary`.
+        if let (Expr::Binary(lhs, op, rhs), Type::Int) = (expr, target) {
+            if *op != BinOp::Concat {
+                let lty = self.check_expr_for(lhs, target);
+                let rty = self.check_expr_for(rhs, target);
+                return self.check_binary(*op, lty?, rty?);
+            }
+        }
+        if let (Expr::Unary(op, inner), Type::Int) = (expr, target) {
+            let ity = self.check_expr_for(inner, target)?;
+            return match op {
+                UnOp::Neg | UnOp::Factorial => Some(Type::Int),
+                UnOp::Not => {
+                    self.error(format!("{op} not supported on {ity}"));
+                    None
+                }
+            };
+        }
         let (Expr::ArrayLiteral(elements), Type::Array(elem)) = (expr, target) else {
             return self.check_expr(expr);
         };
@@ -562,6 +647,21 @@ impl TypeChecker {
             }
         }
         if ok { Some(target) } else { None }
+    }
+
+    /// A bare numeric literal being treated as `int` -- from a known
+    /// target type (`check_expr_for`) or paired with an already-`int`
+    /// operand in a binary op (`check_expr`'s `Expr::Binary` arm) -- must
+    /// actually be a whole number. `int` exists specifically to rule out
+    /// a fractional value ever ending up in one, so this is checked at
+    /// every point a literal could become `int`, not just storage.
+    fn check_whole_number_literal(&mut self, n: f64) -> Option<Type> {
+        if n.fract() == 0.0 {
+            Some(Type::Int)
+        } else {
+            self.error(format!("{n} is not a whole number, can't use it as int"));
+            None
+        }
     }
 }
 
@@ -585,6 +685,12 @@ fn coercible(from: Type, to: Type) -> bool {
         // with `str`, the same relationship `num`/`numw` already have.
         (Type::Str | Type::File, Type::Str | Type::File) => true,
         (Type::Bool, Type::Bool) => true,
+        // No coercion from num/numw/bignum into int -- a fractional
+        // value ever ending up in an int is exactly what the type exists
+        // to rule out, so (unlike bignum, which happily accepts any
+        // numeric-shaped source) int only ever accepts int itself, the
+        // same restriction bool already has.
+        (Type::Int, Type::Int) => true,
         // No cross-element-type coercion -- an array:num can't quietly
         // become an array:str the way a bare num can become a str-typed
         // display via stch. Element types must match exactly.

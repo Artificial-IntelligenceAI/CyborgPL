@@ -1,0 +1,33 @@
+func 'double_it'*'x': int* -> int {
+    return (ref:var:int 'x') x (2);
+}
+
+START
+    var:int 'a' = (7);
+    var:int 'b' = (2);
+    print*"a=" (ref:var:int 'a') " b=" (ref:var:int 'b')*;
+
+    print*"a+b=" (ref:var:int 'a') + (ref:var:int 'b')*;
+    print*"a-b=" (ref:var:int 'a') - (ref:var:int 'b')*;
+    print*"axb=" (ref:var:int 'a') x (ref:var:int 'b')*;
+    print*"a/b=" (ref:var:int 'a') / (ref:var:int 'b')*;
+    print*"a+1=" (ref:var:int 'a') + (1)*;
+
+    print*"a<b=" (ref:var:int 'a') < (ref:var:int 'b')*;
+    print*"neg a=" -(ref:var:int 'a')*;
+
+    var:int 'c' = (2) xx (10);
+    print*"2 xx 10=" (ref:var:int 'c')*;
+
+    var:int 'd' = (2) xxx (3);
+    print*"2 xxx 3=" (ref:var:int 'd')*;
+
+    var:int 'e' = (5)!;
+    print*"5!=" (ref:var:int 'e')*;
+
+    print*"double_it(21)=" ref:func 'double_it'*(21)**;
+
+    var:array:int 'nums' = {(1), (2), (3)};
+    append*(ref:var:array:int 'nums'), (4)*;
+    print*"nums[1]=" (ref:var:array:int 'nums'*(1)*) " nums[4]=" (ref:var:array:int 'nums'*(4)*) " length=" (length*ref:var:array:int 'nums'*)*;
+END

@@ -99,6 +99,7 @@ impl Parser {
             "str" => Ok(Type::Str),
             "bignum" => Ok(Type::BigNum(DEFAULT_BIGNUM_PRECISION)),
             "file" => Ok(Type::File),
+            "int" => Ok(Type::Int),
             // `array:elem_type`, e.g. `array:num`, `array:str` -- the
             // element type is parsed with the exact same grammar a bare
             // type would be (including its own `[precision:N]`, e.g.
