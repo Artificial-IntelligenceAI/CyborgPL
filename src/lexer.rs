@@ -3,6 +3,11 @@ use crate::token::Token;
 pub struct Lexer<'a> {
     chars: std::iter::Peekable<std::str::Chars<'a>>,
     pub line: usize,
+    /// Whether every character seen since the last newline (or the start
+    /// of the file) has been whitespace -- i.e. whether we're currently at
+    /// the first non-whitespace position on a line. `#`/`#N` comments are
+    /// only recognized there, never trailing after real code.
+    at_line_start: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -16,6 +21,7 @@ impl<'a> Lexer<'a> {
         Lexer {
             chars: source.chars().peekable(),
             line: 1,
+            at_line_start: true,
         }
     }
 
@@ -33,13 +39,14 @@ impl<'a> Lexer<'a> {
     }
 
     fn next_token(&mut self) -> Result<Spanned, String> {
-        self.skip_whitespace_and_comments();
+        self.skip_whitespace_and_comments()?;
         let line = self.line;
 
         let c = match self.chars.next() {
             Some(c) => c,
             None => return Ok(Spanned { token: Token::Eof, line }),
         };
+        self.at_line_start = false;
 
         let token = match c {
             '(' => Token::LParen,
@@ -217,34 +224,62 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn skip_whitespace_and_comments(&mut self) {
+    /// `#` (or `#N`, e.g. `#5`) comments out whole lines -- only recognized
+    /// as the first non-whitespace thing on a line, never trailing after
+    /// real code. Bare `#` comments out just that one line, same as `#1`.
+    /// `#N` comments out N total lines starting with that one (`#5`
+    /// comments out its own line and 4 more below it). `N` beyond the
+    /// remaining lines in the file just comments out whatever's left.
+    fn skip_whitespace_and_comments(&mut self) -> Result<(), String> {
         loop {
             match self.chars.peek() {
                 Some('\n') => {
                     self.line += 1;
                     self.chars.next();
+                    self.at_line_start = true;
                 }
                 Some(c) if c.is_whitespace() => {
                     self.chars.next();
                 }
-                Some('/') => {
-                    let mut clone = self.chars.clone();
-                    clone.next();
-                    if clone.peek() == Some(&'/') {
-                        // line comment: consume until newline
+                Some('#') => {
+                    if !self.at_line_start {
+                        return Err(format!(
+                            "line {}: '#' comments must start at the beginning of a line",
+                            self.line
+                        ));
+                    }
+                    self.chars.next();
+                    let mut digits = String::new();
+                    while let Some(&c) = self.chars.peek() {
+                        if c.is_ascii_digit() {
+                            digits.push(c);
+                            self.chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    let line_count: usize = if digits.is_empty() { 1 } else { digits.parse().unwrap() };
+
+                    for _ in 0..line_count {
                         while let Some(&c) = self.chars.peek() {
                             if c == '\n' {
                                 break;
                             }
                             self.chars.next();
                         }
-                    } else {
-                        break;
+                        if self.chars.peek() == Some(&'\n') {
+                            self.chars.next();
+                            self.line += 1;
+                            self.at_line_start = true;
+                        } else {
+                            break;
+                        }
                     }
                 }
                 _ => break,
             }
         }
+        Ok(())
     }
 
     fn peek_char(&mut self) -> Option<char> {
