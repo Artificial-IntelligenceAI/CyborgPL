@@ -1962,9 +1962,9 @@ impl<'ctx> Codegen<'ctx> {
 
         let height_int = self.builder.build_float_to_signed_int(height, i64_ty, "tet_height").unwrap();
 
-        let result_slot = self.builder.build_alloca(f64_ty, "tet_result").unwrap();
+        let result_slot = self.entry_alloca(f64_ty.into(), "tet_result");
         self.builder.build_store(result_slot, base).unwrap();
-        let counter_slot = self.builder.build_alloca(i64_ty, "tet_i").unwrap();
+        let counter_slot = self.entry_alloca(i64_ty.into(), "tet_i");
         self.builder.build_store(counter_slot, i64_ty.const_int(2, true)).unwrap();
 
         let cond_bb = self.context.append_basic_block(function, "tet_cond");
@@ -2026,9 +2026,9 @@ impl<'ctx> Codegen<'ctx> {
 
         let initial = self.bignum_new(DEFAULT_BIGNUM_PRECISION);
         self.builder.build_call(self.bignum.copy, &[initial.into(), base.into()], "tet_bignum_init_copy").unwrap();
-        let result_slot = self.builder.build_alloca(bignum_ty, "tet_bignum_result").unwrap();
+        let result_slot = self.entry_alloca(bignum_ty.into(), "tet_bignum_result");
         self.builder.build_store(result_slot, self.wrap_bignum_ptr(initial)).unwrap();
-        let counter_slot = self.builder.build_alloca(i64_ty, "tet_bignum_i").unwrap();
+        let counter_slot = self.entry_alloca(i64_ty.into(), "tet_bignum_i");
         self.builder.build_store(counter_slot, i64_ty.const_int(2, true)).unwrap();
 
         let cond_bb = self.context.append_basic_block(function, "tet_bignum_cond");
@@ -2072,9 +2072,9 @@ impl<'ctx> Codegen<'ctx> {
 
         let n_int = self.builder.build_float_to_signed_int(n, i64_ty, "fact_n").unwrap();
 
-        let result_slot = self.builder.build_alloca(f64_ty, "fact_result").unwrap();
+        let result_slot = self.entry_alloca(f64_ty.into(), "fact_result");
         self.builder.build_store(result_slot, f64_ty.const_float(1.0)).unwrap();
-        let counter_slot = self.builder.build_alloca(i64_ty, "fact_i").unwrap();
+        let counter_slot = self.entry_alloca(i64_ty.into(), "fact_i");
         self.builder.build_store(counter_slot, i64_ty.const_int(2, true)).unwrap();
 
         let cond_bb = self.context.append_basic_block(function, "fact_cond");
@@ -2126,9 +2126,9 @@ impl<'ctx> Codegen<'ctx> {
 
         let initial = self.bignum_new(DEFAULT_BIGNUM_PRECISION);
         self.builder.build_call(self.bignum.set_d, &[initial.into(), f64_ty.const_float(1.0).into()], "fact_bignum_init").unwrap();
-        let result_slot = self.builder.build_alloca(bignum_ty, "fact_bignum_result").unwrap();
+        let result_slot = self.entry_alloca(bignum_ty.into(), "fact_bignum_result");
         self.builder.build_store(result_slot, self.wrap_bignum_ptr(initial)).unwrap();
-        let counter_slot = self.builder.build_alloca(i64_ty, "fact_bignum_i").unwrap();
+        let counter_slot = self.entry_alloca(i64_ty.into(), "fact_bignum_i");
         self.builder.build_store(counter_slot, i64_ty.const_int(2, true)).unwrap();
 
         let cond_bb = self.context.append_basic_block(function, "fact_bignum_cond");
