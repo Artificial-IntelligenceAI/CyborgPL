@@ -1,0 +1,70 @@
+START
+
+# num array: literal, 1-based read, append, index write, length in a loop
+var:array:num 'nums' = {(1), (2), (3)};
+print*"nums[1]=" (ref:var:array:num 'nums'*(1)*) " nums[3]=" (ref:var:array:num 'nums'*(3)*) " length=" (length*(ref:var:array:num 'nums')*)*;
+
+append*(ref:var:array:num 'nums'), (4)*;
+print*"after append, length=" (length*(ref:var:array:num 'nums')*) " nums[4]=" (ref:var:array:num 'nums'*(4)*)*;
+
+ref:var:array:num 'nums'*(2)* = (99);
+print*"after write, nums[2]=" (ref:var:array:num 'nums'*(2)*)*;
+
+var:num 'i' = (1);
+var:num 'sum' = (0);
+while (ref:var:num 'i') <= (length*(ref:var:array:num 'nums')*) {
+    ref:var:num 'sum' = (ref:var:num 'sum') + (ref:var:array:num 'nums'*(ref:var:num 'i')*);
+    ref:var:num 'i' = (ref:var:num 'i') + (1);
+}
+print*"sum=" (ref:var:num 'sum')*;
+
+# str array: literal, read, append, index write (replaces old element)
+var:array:str 'words' = {("hello"), ("world")};
+print*"words[1]=" (ref:var:array:str 'words'*(1)*) " words[2]=" (ref:var:array:str 'words'*(2)*)*;
+append*(ref:var:array:str 'words'), ("cyborgpl")*;
+ref:var:array:str 'words'*(1)* = ("goodbye");
+print*"words[1]=" (ref:var:array:str 'words'*(1)*) " words[3]=" (ref:var:array:str 'words'*(3)*) " length=" (length*(ref:var:array:str 'words')*)*;
+
+# bignum array
+var:array:bignum 'bigs' = {("123456789012345678901234567890"), ("2")};
+print*"bigs[1]=" (ref:var:array:bignum 'bigs'*(1)*) " bigs[2]=" (ref:var:array:bignum 'bigs'*(2)*)*;
+append*(ref:var:array:bignum 'bigs'), ("999999999999999999999999999999")*;
+ref:var:array:bignum 'bigs'*(2)* = ("42");
+print*"bigs[2]=" (ref:var:array:bignum 'bigs'*(2)*) " bigs[3]=" (ref:var:array:bignum 'bigs'*(3)*) " length=" (length*(ref:var:array:bignum 'bigs')*)*;
+
+# bool array
+var:array:bool 'flags' = {(true), (false), (true)};
+print*"flags[1]=" (ref:var:array:bool 'flags'*(1)*) " flags[2]=" (ref:var:array:bool 'flags'*(2)*) " flags[3]=" (ref:var:array:bool 'flags'*(3)*)*;
+
+# file array: elements are just typed path strings, same heap-owned story as str
+var:array:file 'files' = {("/tmp/cyborgpl_array_a.txt"), ("/tmp/cyborgpl_array_b.txt")};
+print*"files[1]=" (ref:var:array:file 'files'*(1)*) " files[2]=" (ref:var:array:file 'files'*(2)*)*;
+
+# empty literal + growth past initial capacity (capacity starts at 4, doubles)
+var:array:num 'grown' = {};
+var:num 'j' = (1);
+while (ref:var:num 'j') <= (20) {
+    append*(ref:var:array:num 'grown'), (ref:var:num 'j')*;
+    ref:var:num 'j' = (ref:var:num 'j') + (1);
+}
+print*"grown length=" (length*(ref:var:array:num 'grown')*) " grown[1]=" (ref:var:array:num 'grown'*(1)*) " grown[20]=" (ref:var:array:num 'grown'*(20)*)*;
+
+# reassigning a whole array variable makes an independent copy -- writing
+# through one must not affect the other, and both get freed independently
+# without a double free.
+var:array:num 'copy' = (ref:var:array:num 'nums');
+ref:var:array:num 'copy'*(1)* = (777);
+print*"nums[1]=" (ref:var:array:num 'nums'*(1)*) " copy[1]=" (ref:var:array:num 'copy'*(1)*)*;
+
+# reassigning the whole array variable to a fresh literal frees the old one
+ref:var:array:num 'copy' = {(11), (22)};
+print*"copy after reassign, length=" (length*(ref:var:array:num 'copy')*) " copy[1]=" (ref:var:array:num 'copy'*(1)*)*;
+
+# shadowing: a new block-scoped 'nums' of the same name+type
+if (true) {
+    var:array:num 'nums' = {(500)};
+    print*"shadowed nums[1]=" (ref:var:array:num 'nums'*(1)*)*;
+}
+print*"outer nums[1]=" (ref:var:array:num 'nums'*(1)*)*;
+
+END

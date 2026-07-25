@@ -26,7 +26,59 @@ pub enum Type {
     /// own type purely for clarity at the type-system level, the same
     /// relationship `NumW` has to `Num`.
     File,
+    /// A growable, homogeneous array of `ElementType`. Flat (not `Box`ed
+    /// or recursive) specifically so `Type` can stay `Copy` -- no arrays
+    /// of arrays for this first version, only scalar element types.
+    Array(ElementType),
     Void,
+}
+
+/// The scalar types an `Array` can hold. A separate, deliberately
+/// non-recursive enum (rather than letting `Type::Array` hold a boxed
+/// `Type` directly) so nested arrays are simply inexpressible for now,
+/// and so `Type` itself never needs to stop being `Copy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ElementType {
+    Num(u32),
+    NumW(u32),
+    Bool,
+    Str,
+    BigNum(u32),
+    File,
+}
+
+impl ElementType {
+    pub fn as_type(self) -> Type {
+        match self {
+            ElementType::Num(w) => Type::Num(w),
+            ElementType::NumW(w) => Type::NumW(w),
+            ElementType::Bool => Type::Bool,
+            ElementType::Str => Type::Str,
+            ElementType::BigNum(p) => Type::BigNum(p),
+            ElementType::File => Type::File,
+        }
+    }
+
+    /// `None` for `Type::Array(_)` (no nested arrays) and `Type::Void`
+    /// (never a valid element type) -- every other `Type` has a direct
+    /// `ElementType` counterpart.
+    pub fn from_type(ty: Type) -> Option<ElementType> {
+        match ty {
+            Type::Num(w) => Some(ElementType::Num(w)),
+            Type::NumW(w) => Some(ElementType::NumW(w)),
+            Type::Bool => Some(ElementType::Bool),
+            Type::Str => Some(ElementType::Str),
+            Type::BigNum(p) => Some(ElementType::BigNum(p)),
+            Type::File => Some(ElementType::File),
+            Type::Array(_) | Type::Void => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ElementType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_type())
+    }
 }
 
 pub const DEFAULT_NUM_PRECISION: u32 = 64;
@@ -43,6 +95,7 @@ impl std::fmt::Display for Type {
             Type::Str => write!(f, "str"),
             Type::BigNum(p) => write!(f, "bignum[precision:{p}]"),
             Type::File => write!(f, "file"),
+            Type::Array(elem) => write!(f, "array:{elem}"),
             Type::Void => write!(f, "void"),
         }
     }
@@ -132,6 +185,18 @@ pub enum Expr {
     Unary(UnOp, Box<Expr>),
     Binary(Box<Expr>, BinOp, Box<Expr>),
     Call(String, Vec<Expr>),
+    /// `{(v1), (v2), ...}` -- an array literal. The element type isn't
+    /// carried here; it comes from wherever this literal is being stored
+    /// (a `var:array:TYPE` declaration), the same way a bare `Num` literal
+    /// doesn't know its own target type either.
+    ArrayLiteral(Vec<Expr>),
+    /// `ref:var:array:TYPE 'name'*(index)*` -- reads a single element (`1`
+    /// is the first element, not `0`). `Type` is the *array's* type
+    /// (`Array(ElementType)`), matching how `Var` carries the type stated
+    /// at the reference site for the same (name, type) key lookup.
+    ArrayIndex(String, Type, Box<Expr>),
+    /// `(length*(array)*)` -- element count, as a `num`.
+    Length(Box<Expr>),
 }
 
 /// One piece of a `print` argument: literal text outside any parens, or a
@@ -155,6 +220,11 @@ pub enum Stmt {
     /// since the program started. Currently only `Num` supports this.
     Clock(String, Type),
     Assign(String, Type, Expr),
+    /// `ref:var:array:TYPE 'name'*(index)* = value;` -- writes a single
+    /// element (`1` is the first element). `Type` is the array's type.
+    ArrayIndexAssign(String, Type, Expr, Expr),
+    /// `append*(array), (value)*;` -- grows the array by one element.
+    Append(Expr, Expr),
     Return(Option<Expr>),
     /// The optional `[to*(dest)*]` clause -- `None` prints to the screen
     /// as always; `Some(dest)` redirects this call to that file instead

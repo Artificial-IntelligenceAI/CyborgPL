@@ -23,6 +23,13 @@ enum Shape {
     Int,
     Str,
     BigNum,
+    /// Genuinely distinct from `BigNum`, even though codegen happens to
+    /// reuse bignum's exact `{ptr}`-wrapped struct to represent arrays at
+    /// the LLVM level (both are `StructValue` there). This type checker is
+    /// the *only* thing standing between that reuse and a bignum/array
+    /// value getting silently confused with each other, so the two must
+    /// never share a shape here.
+    Array,
 }
 
 fn shape_of(ty: Type) -> Shape {
@@ -31,6 +38,7 @@ fn shape_of(ty: Type) -> Shape {
         Type::Bool => Shape::Int,
         Type::Str | Type::File => Shape::Str,
         Type::BigNum(_) => Shape::BigNum,
+        Type::Array(_) => Shape::Array,
         Type::Void => panic!("Void has no runtime shape; should never reach type-checking"),
     }
 }
@@ -134,7 +142,7 @@ impl TypeChecker {
     fn check_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::VarDecl(name, ty, expr) => {
-                if let Some(expr_ty) = self.check_expr(expr) {
+                if let Some(expr_ty) = self.check_expr_for(expr, *ty) {
                     if !coercible(expr_ty, *ty) {
                         self.error(format!(
                             "cannot assign {expr_ty} to variable '{name}' declared as {ty}"
@@ -168,7 +176,7 @@ impl TypeChecker {
                     self.check_expr(expr);
                     return;
                 }
-                if let Some(expr_ty) = self.check_expr(expr) {
+                if let Some(expr_ty) = self.check_expr_for(expr, *ty) {
                     if !coercible(expr_ty, *ty) {
                         self.error(format!(
                             "cannot assign {expr_ty} to variable '{name}' declared as {ty}"
@@ -176,9 +184,52 @@ impl TypeChecker {
                     }
                 }
             }
+            Stmt::ArrayIndexAssign(name, ty, index, value) => {
+                let declared_ok = self.check_var_ref(name, *ty);
+                if let Some(ity) = self.check_expr(index) {
+                    if shape_of(ity) != Shape::Float {
+                        self.error(format!("array index must be num, got {ity}"));
+                    }
+                }
+                match ty {
+                    Type::Array(elem) if declared_ok => {
+                        let elem_ty = elem.as_type();
+                        if let Some(vty) = self.check_expr_for(value, elem_ty) {
+                            if !coercible(vty, elem_ty) {
+                                self.error(format!("cannot assign {vty} to array element of type {elem_ty}"));
+                            }
+                        }
+                    }
+                    Type::Array(_) => {
+                        self.check_expr(value);
+                    }
+                    other => {
+                        self.error(format!("'{name}' can't be indexed -- declared as {other}, not an array"));
+                        self.check_expr(value);
+                    }
+                }
+            }
+            Stmt::Append(array_expr, value_expr) => match self.check_expr(array_expr) {
+                Some(Type::Array(elem)) => {
+                    let elem_ty = elem.as_type();
+                    if let Some(vty) = self.check_expr_for(value_expr, elem_ty) {
+                        if !coercible(vty, elem_ty) {
+                            self.error(format!("cannot append {vty} to an array of {elem_ty}"));
+                        }
+                    }
+                }
+                Some(other) => {
+                    self.error(format!("append*...*'s first argument must be an array, got {other}"));
+                    self.check_expr(value_expr);
+                }
+                None => {
+                    self.check_expr(value_expr);
+                }
+            },
             Stmt::Return(expr) => match expr {
                 Some(e) => {
-                    if let Some(ety) = self.check_expr(e) {
+                    let return_ty = self.current_return_type;
+                    if let Some(ety) = self.check_expr_for(e, return_ty) {
                         if !coercible(ety, self.current_return_type) {
                             self.error(format!(
                                 "returning {ety} but the function is declared to return {}",
@@ -244,7 +295,11 @@ impl TypeChecker {
     fn check_print_segments(&mut self, segments: &[PrintSegment]) {
         for seg in segments {
             if let PrintSegment::Expr(e) = seg {
-                self.check_expr(e);
+                if let Some(ty) = self.check_expr(e) {
+                    if matches!(ty, Type::Array(_)) {
+                        self.error(format!("can't print an array value directly, got {ty}"));
+                    }
+                }
             }
         }
     }
@@ -285,19 +340,45 @@ impl TypeChecker {
             Expr::Bool(_) => Some(Type::Bool),
             Expr::Str(_) => Some(Type::Str),
             Expr::Var(name, ty) => {
-                let key = (name.clone(), *ty);
-                if self.vars.contains(&key) {
+                if self.check_var_ref(name, *ty) {
                     Some(*ty)
-                } else if let Some((_, actual_ty)) = self.vars.iter().find(|(n, _)| n == name) {
-                    self.error(format!(
-                        "'{name}' is declared as {actual_ty}, not {ty} -- check the type stated at this reference"
-                    ));
-                    None
                 } else {
-                    self.error(format!("undefined variable '{name}'"));
                     None
                 }
             }
+            Expr::ArrayLiteral(_) => {
+                // Reached only when an array literal shows up somewhere
+                // with no known target type (e.g. a bare
+                // `print*({1,2,3})*;`) -- check_expr_for handles the
+                // context-aware case (var decl, assign, return, call
+                // argument) before ever falling through to here.
+                self.error("array literal needs a known target type here (e.g. a var:array:TYPE declaration, argument, or return)".to_string());
+                None
+            }
+            Expr::ArrayIndex(name, ty, index) => {
+                let elem = match ty {
+                    Type::Array(elem) => Some(*elem),
+                    other => {
+                        self.error(format!("'{name}' can't be indexed -- declared as {other}, not an array"));
+                        None
+                    }
+                };
+                let declared_ok = self.check_var_ref(name, *ty);
+                if let Some(ity) = self.check_expr(index) {
+                    if shape_of(ity) != Shape::Float {
+                        self.error(format!("array index must be num, got {ity}"));
+                    }
+                }
+                if declared_ok { elem.map(|e| e.as_type()) } else { None }
+            }
+            Expr::Length(array_expr) => match self.check_expr(array_expr) {
+                Some(Type::Array(_)) => Some(Type::Num(DEFAULT_NUM_PRECISION)),
+                Some(other) => {
+                    self.error(format!("length*...* expects an array, got {other}"));
+                    None
+                }
+                None => None,
+            },
             Expr::Unary(op, inner) => {
                 let ity = self.check_expr(inner)?;
                 match (op, ity) {
@@ -322,7 +403,13 @@ impl TypeChecker {
                 let (lty, rty) = (lty?, rty?);
                 if *op == BinOp::Concat {
                     // Accepts any shape on either side, auto-converting to
-                    // display text like print -- no restriction at all.
+                    // display text like print -- except an array, which
+                    // codegen's value_fmt has no way to render (and can't
+                    // tell apart from a bignum at the LLVM level besides).
+                    if matches!(lty, Type::Array(_)) || matches!(rty, Type::Array(_)) {
+                        self.error(format!("stch doesn't support array operands ({lty} / {rty})"));
+                        return None;
+                    }
                     return Some(Type::Str);
                 }
                 self.check_binary(*op, lty, rty)
@@ -412,7 +499,7 @@ impl TypeChecker {
         }
         let mut ok = true;
         for (a, &pty) in args.iter().zip(param_types.iter()) {
-            match self.check_expr(a) {
+            match self.check_expr_for(a, pty) {
                 Some(aty) if coercible(aty, pty) => {}
                 Some(aty) => {
                     self.error(format!("function '{name}' argument type mismatch: expected {pty}, got {aty}"));
@@ -425,6 +512,56 @@ impl TypeChecker {
             return None;
         }
         Some(return_type)
+    }
+
+    /// Whether `(name, ty)` refers to an actually-declared variable,
+    /// reporting the appropriate error otherwise. Shared by `Expr::Var`
+    /// and `Expr::ArrayIndex`/`Stmt::ArrayIndexAssign`, which all resolve
+    /// a named variable the same way before doing their own extra work.
+    fn check_var_ref(&mut self, name: &str, ty: Type) -> bool {
+        let key = (name.to_string(), ty);
+        if self.vars.contains(&key) {
+            true
+        } else if let Some((_, actual_ty)) = self.vars.iter().find(|(n, _)| n == name) {
+            self.error(format!(
+                "'{name}' is declared as {actual_ty}, not {ty} -- check the type stated at this reference"
+            ));
+            false
+        } else {
+            self.error(format!("undefined variable '{name}'"));
+            false
+        }
+    }
+
+    /// Infers `expr`'s type when it's about to be checked against a known
+    /// `target` type (a var decl's declared type, a reassignment, a
+    /// return, a call argument's parameter type). Needed because an array
+    /// literal's element type is only recoverable from such a target --
+    /// an empty `{}` has nothing to infer from -- so `Expr::ArrayLiteral`
+    /// can't go through the generic, context-free `check_expr` the way
+    /// every other expression does (mirrors codegen's
+    /// compile_and_coerce/compile_array_literal split). Every element is
+    /// itself checked against `target`'s element type, recursively -- so
+    /// e.g. a bare bignum literal inside an array of `bignum` is still
+    /// fine. Any other expression is unaffected, falling straight through
+    /// to `check_expr`.
+    fn check_expr_for(&mut self, expr: &Expr, target: Type) -> Option<Type> {
+        let (Expr::ArrayLiteral(elements), Type::Array(elem)) = (expr, target) else {
+            return self.check_expr(expr);
+        };
+        let elem_ty = elem.as_type();
+        let mut ok = true;
+        for e in elements {
+            match self.check_expr_for(e, elem_ty) {
+                Some(ety) if coercible(ety, elem_ty) => {}
+                Some(ety) => {
+                    self.error(format!("cannot use {ety} as an element of {target}"));
+                    ok = false;
+                }
+                None => ok = false,
+            }
+        }
+        if ok { Some(target) } else { None }
     }
 }
 
@@ -448,6 +585,10 @@ fn coercible(from: Type, to: Type) -> bool {
         // with `str`, the same relationship `num`/`numw` already have.
         (Type::Str | Type::File, Type::Str | Type::File) => true,
         (Type::Bool, Type::Bool) => true,
+        // No cross-element-type coercion -- an array:num can't quietly
+        // become an array:str the way a bare num can become a str-typed
+        // display via stch. Element types must match exactly.
+        (Type::Array(a), Type::Array(b)) => a == b,
         _ => false,
     }
 }

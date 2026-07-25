@@ -6,7 +6,7 @@ use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
 use inkwell::passes::PassBuilderOptions;
 use inkwell::targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine};
-use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum, FloatType, StructType};
+use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FloatType, StructType};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FloatValue, FunctionValue, PointerValue};
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel};
 
@@ -143,6 +143,13 @@ pub struct Codegen<'ctx> {
     /// `parse_num_or_die_fn` for `num`), same "crash with a clear message"
     /// failure mode as opening a file for writing already has.
     read_file_fn: FunctionValue<'ctx>,
+    /// runtime/array/array_shim.c -- `var:array:TYPE`'s growable, type-erased
+    /// (element size in bytes only) backing buffer.
+    array_new_fn: FunctionValue<'ctx>,
+    array_free_fn: FunctionValue<'ctx>,
+    array_append_fn: FunctionValue<'ctx>,
+    array_get_ptr_fn: FunctionValue<'ctx>,
+    array_length_fn: FunctionValue<'ctx>,
     bignum: BignumFns<'ctx>,
 }
 
@@ -198,6 +205,26 @@ impl<'ctx> Codegen<'ctx> {
 
         let read_file_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
         let read_file_fn = module.add_function("cyborg_read_file_or_die", read_file_type, Some(Linkage::External));
+
+        // runtime/array/array_shim.c -- type-erased (element size in bytes
+        // only); codegen does its own load/store through the raw slot
+        // pointer cyborg_array_get_ptr returns, since opaque pointers mean
+        // no cast is needed regardless of the element's actual type.
+        let array_i64_ty = context.i64_type();
+        let array_new_type = i8_ptr.fn_type(&[array_i64_ty.into()], false);
+        let array_new_fn = module.add_function("cyborg_array_new", array_new_type, Some(Linkage::External));
+
+        let array_free_type = context.void_type().fn_type(&[i8_ptr.into()], false);
+        let array_free_fn = module.add_function("cyborg_array_free", array_free_type, Some(Linkage::External));
+
+        let array_append_type = context.void_type().fn_type(&[i8_ptr.into(), i8_ptr.into()], false);
+        let array_append_fn = module.add_function("cyborg_array_append", array_append_type, Some(Linkage::External));
+
+        let array_get_ptr_type = i8_ptr.fn_type(&[i8_ptr.into(), array_i64_ty.into()], false);
+        let array_get_ptr_fn = module.add_function("cyborg_array_get_ptr", array_get_ptr_type, Some(Linkage::External));
+
+        let array_length_type = array_i64_ty.fn_type(&[i8_ptr.into()], false);
+        let array_length_fn = module.add_function("cyborg_array_length", array_length_type, Some(Linkage::External));
 
         // runtime/gmp/bignum_shim.c -- every handle is an opaque i8_ptr, so
         // these signatures are the same shape regardless of what GMP itself
@@ -298,6 +325,11 @@ impl<'ctx> Codegen<'ctx> {
             fprintf_fn,
             fclose_fn,
             read_file_fn,
+            array_new_fn,
+            array_free_fn,
+            array_append_fn,
+            array_get_ptr_fn,
+            array_length_fn,
             bignum,
         }
     }
@@ -347,7 +379,13 @@ impl<'ctx> Codegen<'ctx> {
             Type::NumW(width) => self.float_type_for(width).into(),
             Type::Bool => self.context.bool_type().into(),
             Type::Str | Type::File => self.context.ptr_type(AddressSpace::default()).into(),
-            Type::BigNum(_) => self.bignum_struct_type().into(),
+            // Same wrapped-pointer shape as `BigNum` -- reused directly,
+            // not a second copy of the same trick. Structurally identical
+            // to bignum at the LLVM level (an unnamed `{ptr}` struct type
+            // is the same type either way); the type checker is the only
+            // thing keeping the two from ever being confused, same as it
+            // already keeps `bignum` and `str` (a bare pointer) apart.
+            Type::BigNum(_) | Type::Array(_) => self.bignum_struct_type().into(),
             Type::Void => panic!("void has no runtime representation"),
         }
     }
@@ -479,6 +517,7 @@ impl<'ctx> Codegen<'ctx> {
                 .try_as_basic_value()
                 .basic()
                 .unwrap(),
+            (_, Type::Array(elem)) => self.coerce_to_array(value, elem),
             _ => value,
         }
     }
@@ -500,8 +539,132 @@ impl<'ctx> Codegen<'ctx> {
             let text_ptr = self.builder.build_global_string_ptr(text, "bignum_lit").unwrap().as_pointer_value();
             return Ok(self.coerce_to_type(text_ptr.into(), ty));
         }
+        // An array literal's element type isn't recoverable from the
+        // expression alone (an empty `{}` has nothing to infer from) --
+        // it only ever comes from a known target type, exactly like a
+        // bare bignum literal's precision above. Bypasses compile_expr
+        // (whose own ArrayLiteral arm exists purely as a defensive panic)
+        // and coerce_to_type entirely -- the freshly built array here is
+        // already an independent value, so there's nothing to copy.
+        if let (Expr::ArrayLiteral(elements), Type::Array(elem)) = (expr, ty) {
+            return self.compile_array_literal(elements, elem);
+        }
         let value = self.compile_expr(expr)?;
         Ok(self.coerce_to_type(value, ty))
+    }
+
+    /// Builds a fresh array from `{(v1), (v2), ...}`, appending each
+    /// element (itself run through `compile_and_coerce` against `elem`,
+    /// so e.g. a bare bignum literal inside an array of `bignum` still
+    /// gets its full precision, not just an `f64`'s worth).
+    fn compile_array_literal(&mut self, elements: &[Expr], elem: ElementType) -> Result<BasicValueEnum<'ctx>, String> {
+        let elem_ty = elem.as_type();
+        let elem_llvm_ty = self.basic_type(elem_ty);
+        let elem_size = elem_llvm_ty.size_of().expect("every element type has a known size");
+        let handle = self
+            .builder
+            .build_call(self.array_new_fn, &[elem_size.into()], "array_lit_new")
+            .unwrap()
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_pointer_value();
+
+        for elem_expr in elements {
+            let value = self.compile_and_coerce(elem_expr, elem_ty)?;
+            let value_slot = self.entry_alloca(elem_llvm_ty, "array_lit_value_slot");
+            self.builder.build_store(value_slot, value).unwrap();
+            self.builder
+                .build_call(self.array_append_fn, &[handle.into(), value_slot.into()], "array_lit_append_call")
+                .unwrap();
+        }
+
+        Ok(self.wrap_bignum_ptr(handle))
+    }
+
+    /// Converts an already-compiled array value into a *freshly allocated,
+    /// independent copy* -- the same "always copy on store" rule
+    /// `bignum`/`str` already follow, and for arrays specifically also a
+    /// correctness requirement: without an independent copy, two
+    /// variables could end up sharing the same handle, and each being
+    /// freed independently at its own scope exit would double-free it.
+    /// Deep-copies `str`/`file`/`bignum` elements too (each is
+    /// independently heap-owned); `num`/`numw`/`bool` elements are copied
+    /// by value as-is.
+    fn coerce_to_array(&self, value: BasicValueEnum<'ctx>, elem: ElementType) -> BasicValueEnum<'ctx> {
+        let function = self.current_function();
+        let src_handle = self.unwrap_bignum_ptr(value);
+        let elem_ty = elem.as_type();
+        let elem_llvm_ty = self.basic_type(elem_ty);
+        let elem_size = elem_llvm_ty.size_of().expect("every element type has a known size");
+
+        let new_handle = self
+            .builder
+            .build_call(self.array_new_fn, &[elem_size.into()], "array_copy_new")
+            .unwrap()
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_pointer_value();
+
+        let length = self
+            .builder
+            .build_call(self.array_length_fn, &[src_handle.into()], "array_copy_len")
+            .unwrap()
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_int_value();
+
+        let i64_ty = self.context.i64_type();
+        let counter_slot = self.entry_alloca(i64_ty.into(), "array_copy_i");
+        self.builder.build_store(counter_slot, i64_ty.const_int(1, true)).unwrap();
+
+        let cond_bb = self.context.append_basic_block(function, "array_copy_cond");
+        let body_bb = self.context.append_basic_block(function, "array_copy_body");
+        let end_bb = self.context.append_basic_block(function, "array_copy_end");
+        self.builder.build_unconditional_branch(cond_bb).unwrap();
+
+        self.builder.position_at_end(cond_bb);
+        let counter = self.builder.build_load(i64_ty, counter_slot, "array_copy_i_load").unwrap().into_int_value();
+        let keep_going = self
+            .builder
+            .build_int_compare(IntPredicate::SLE, counter, length, "array_copy_test")
+            .unwrap();
+        self.builder.build_conditional_branch(keep_going, body_bb, end_bb).unwrap();
+
+        self.builder.position_at_end(body_bb);
+        let src_slot = self
+            .builder
+            .build_call(self.array_get_ptr_fn, &[src_handle.into(), counter.into()], "array_copy_src_slot")
+            .unwrap()
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_pointer_value();
+        let loaded = self.builder.build_load(elem_llvm_ty, src_slot, "array_copy_elem").unwrap();
+        let to_append = match elem {
+            ElementType::Str | ElementType::File => self
+                .builder
+                .build_call(self.strdup_fn, &[loaded.into_pointer_value().into()], "array_copy_elem_strdup")
+                .unwrap()
+                .try_as_basic_value()
+                .basic()
+                .unwrap(),
+            ElementType::BigNum(precision) => self.coerce_to_bignum(loaded, precision),
+            ElementType::Num(_) | ElementType::NumW(_) | ElementType::Bool => loaded,
+        };
+        let value_slot = self.entry_alloca(elem_llvm_ty, "array_copy_value_slot");
+        self.builder.build_store(value_slot, to_append).unwrap();
+        self.builder
+            .build_call(self.array_append_fn, &[new_handle.into(), value_slot.into()], "array_copy_append_call")
+            .unwrap();
+        let counter_next = self.builder.build_int_add(counter, i64_ty.const_int(1, true), "array_copy_i_next").unwrap();
+        self.builder.build_store(counter_slot, counter_next).unwrap();
+        self.builder.build_unconditional_branch(cond_bb).unwrap();
+
+        self.builder.position_at_end(end_bb);
+        self.wrap_bignum_ptr(new_handle)
     }
 
     /// Widens the narrower of two floats to match the wider one, so binary
@@ -583,6 +746,150 @@ impl<'ctx> Codegen<'ctx> {
         self.builder.build_call(self.libc_free, &[loaded.into()], "str_free_call").unwrap();
     }
 
+    /// Frees the array currently stored in `key`'s variable slot -- reads
+    /// the element type straight off `key` itself, since `Type::Array`
+    /// carries it.
+    /// Determines the element type of an expression already known to
+    /// evaluate to `Type::Array(_)`. In practice this is always a direct
+    /// `ref:var:array:TYPE` reference -- there's no other way yet to
+    /// produce a *named, appendable* array value (no array-returning
+    /// functions, and a fresh literal has nothing to append into).
+    fn array_element_type_of(expr: &Expr) -> ElementType {
+        match expr {
+            Expr::Var(_, Type::Array(elem)) => *elem,
+            other => panic!("expected an array variable reference, found {other:?} -- should have been caught by the type checker"),
+        }
+    }
+
+    fn free_array_var(&mut self, key: &(String, Type)) {
+        let elem = match key.1 {
+            Type::Array(elem) => elem,
+            other => panic!("free_array_var called on non-array key: {other:?}"),
+        };
+        let (ptr, llvm_ty) = *self.variables.get(key).expect("free_array_var on unknown variable");
+        let loaded = self.builder.build_load(llvm_ty, ptr, "array_for_free").unwrap();
+        let handle = self.unwrap_bignum_ptr(loaded);
+        self.free_array_ptr(handle, elem);
+    }
+
+    /// Frees an array's own handle+buffer. For `Str`/`File`/`BigNum`
+    /// elements (each independently heap-owned), every element is freed
+    /// first via a real runtime loop (the length is only known at
+    /// runtime) -- `Num`/`NumW`/`Bool` elements need no per-element
+    /// cleanup at all, since they're plain fixed-size values with nothing
+    /// of their own to free.
+    fn free_array_ptr(&mut self, handle: PointerValue<'ctx>, elem: ElementType) {
+        match elem {
+            ElementType::Str | ElementType::File => self.free_array_str_elements(handle),
+            ElementType::BigNum(_) => self.free_array_bignum_elements(handle),
+            ElementType::Num(_) | ElementType::NumW(_) | ElementType::Bool => {}
+        }
+        self.builder.build_call(self.array_free_fn, &[handle.into()], "array_free_call").unwrap();
+    }
+
+    /// Loops from 1 to the array's length, `libc_free`-ing each `str`/
+    /// `file` element's own buffer. Mirrors `compile_tetration`'s loop
+    /// shape (a real runtime loop, since the length is only known then).
+    fn free_array_str_elements(&mut self, handle: PointerValue<'ctx>) {
+        let function = self.current_function();
+        let i64_ty = self.context.i64_type();
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+
+        let length = self
+            .builder
+            .build_call(self.array_length_fn, &[handle.into()], "arr_free_len")
+            .unwrap()
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_int_value();
+
+        let counter_slot = self.entry_alloca(i64_ty.into(), "arr_free_i");
+        self.builder.build_store(counter_slot, i64_ty.const_int(1, true)).unwrap();
+
+        let cond_bb = self.context.append_basic_block(function, "arr_free_str_cond");
+        let body_bb = self.context.append_basic_block(function, "arr_free_str_body");
+        let end_bb = self.context.append_basic_block(function, "arr_free_str_end");
+        self.builder.build_unconditional_branch(cond_bb).unwrap();
+
+        self.builder.position_at_end(cond_bb);
+        let counter = self.builder.build_load(i64_ty, counter_slot, "arr_free_str_i_load").unwrap().into_int_value();
+        let keep_going = self
+            .builder
+            .build_int_compare(IntPredicate::SLE, counter, length, "arr_free_str_test")
+            .unwrap();
+        self.builder.build_conditional_branch(keep_going, body_bb, end_bb).unwrap();
+
+        self.builder.position_at_end(body_bb);
+        let slot_ptr = self
+            .builder
+            .build_call(self.array_get_ptr_fn, &[handle.into(), counter.into()], "arr_free_str_slot")
+            .unwrap()
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_pointer_value();
+        let elem_ptr = self.builder.build_load(ptr_ty, slot_ptr, "arr_free_str_elem").unwrap().into_pointer_value();
+        self.builder.build_call(self.libc_free, &[elem_ptr.into()], "arr_free_str_elem_call").unwrap();
+        let counter_next = self.builder.build_int_add(counter, i64_ty.const_int(1, true), "arr_free_str_i_next").unwrap();
+        self.builder.build_store(counter_slot, counter_next).unwrap();
+        self.builder.build_unconditional_branch(cond_bb).unwrap();
+
+        self.builder.position_at_end(end_bb);
+    }
+
+    /// Same shape as `free_array_str_elements`, but for `bignum` elements
+    /// -- each slot holds the same wrapped-pointer struct any other
+    /// `bignum` value does, freed via `bignum.free` after unwrapping.
+    fn free_array_bignum_elements(&mut self, handle: PointerValue<'ctx>) {
+        let function = self.current_function();
+        let i64_ty = self.context.i64_type();
+        let bignum_ty = self.bignum_struct_type();
+
+        let length = self
+            .builder
+            .build_call(self.array_length_fn, &[handle.into()], "arr_free_bignum_len")
+            .unwrap()
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_int_value();
+
+        let counter_slot = self.entry_alloca(i64_ty.into(), "arr_free_bignum_i");
+        self.builder.build_store(counter_slot, i64_ty.const_int(1, true)).unwrap();
+
+        let cond_bb = self.context.append_basic_block(function, "arr_free_bignum_cond");
+        let body_bb = self.context.append_basic_block(function, "arr_free_bignum_body");
+        let end_bb = self.context.append_basic_block(function, "arr_free_bignum_end");
+        self.builder.build_unconditional_branch(cond_bb).unwrap();
+
+        self.builder.position_at_end(cond_bb);
+        let counter = self.builder.build_load(i64_ty, counter_slot, "arr_free_bignum_i_load").unwrap().into_int_value();
+        let keep_going = self
+            .builder
+            .build_int_compare(IntPredicate::SLE, counter, length, "arr_free_bignum_test")
+            .unwrap();
+        self.builder.build_conditional_branch(keep_going, body_bb, end_bb).unwrap();
+
+        self.builder.position_at_end(body_bb);
+        let slot_ptr = self
+            .builder
+            .build_call(self.array_get_ptr_fn, &[handle.into(), counter.into()], "arr_free_bignum_slot")
+            .unwrap()
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_pointer_value();
+        let elem_wrapped = self.builder.build_load(bignum_ty, slot_ptr, "arr_free_bignum_elem").unwrap();
+        let elem_ptr = self.unwrap_bignum_ptr(elem_wrapped);
+        self.free_bignum_ptr(elem_ptr);
+        let counter_next = self.builder.build_int_add(counter, i64_ty.const_int(1, true), "arr_free_bignum_i_next").unwrap();
+        self.builder.build_store(counter_slot, counter_next).unwrap();
+        self.builder.build_unconditional_branch(cond_bb).unwrap();
+
+        self.builder.position_at_end(end_bb);
+    }
+
     /// Ends the innermost block scope: every bignum it owns is freed (skip
     /// this only when the block already ended in `return`, since Return
     /// frees everything itself before the terminator -- freeing again
@@ -598,6 +905,7 @@ impl<'ctx> Codegen<'ctx> {
                 match entry.key() {
                     (_, Type::BigNum(_)) => self.free_bignum_var(entry.key()),
                     (_, Type::Str | Type::File) => self.free_str_var(entry.key()),
+                    (_, Type::Array(_)) => self.free_array_var(entry.key()),
                     _ => {}
                 }
             }
@@ -633,7 +941,7 @@ impl<'ctx> Codegen<'ctx> {
             Type::NumW(width) => self.float_type_for(width).fn_type(&param_types, false),
             Type::Bool => self.context.bool_type().fn_type(&param_types, false),
             Type::Str | Type::File => self.context.ptr_type(AddressSpace::default()).fn_type(&param_types, false),
-            Type::BigNum(_) => self.bignum_struct_type().fn_type(&param_types, false),
+            Type::BigNum(_) | Type::Array(_) => self.bignum_struct_type().fn_type(&param_types, false),
             Type::Void => self.context.void_type().fn_type(&param_types, false),
         };
 
@@ -725,7 +1033,7 @@ impl<'ctx> Codegen<'ctx> {
                     let null = self.context.ptr_type(AddressSpace::default()).const_null();
                     self.builder.build_return(Some(&null)).unwrap();
                 }
-                Type::BigNum(_) => {
+                Type::BigNum(_) | Type::Array(_) => {
                     let null_ptr = self.context.ptr_type(AddressSpace::default()).const_null();
                     let zero = self.wrap_bignum_ptr(null_ptr);
                     self.builder.build_return(Some(&zero)).unwrap();
@@ -770,6 +1078,7 @@ impl<'ctx> Codegen<'ctx> {
                     match *ty {
                         Type::BigNum(_) => self.free_bignum_var(&key),
                         Type::Str | Type::File => self.free_str_var(&key),
+                        Type::Array(_) => self.free_array_var(&key),
                         _ => {}
                     }
                 }
@@ -788,6 +1097,7 @@ impl<'ctx> Codegen<'ctx> {
                     match *ty {
                         Type::BigNum(_) => self.free_bignum_var(&key),
                         Type::Str | Type::File => self.free_str_var(&key),
+                        Type::Array(_) => self.free_array_var(&key),
                         _ => {}
                     }
                 }
@@ -866,6 +1176,7 @@ impl<'ctx> Codegen<'ctx> {
                     match *ty {
                         Type::BigNum(_) => self.free_bignum_var(&key),
                         Type::Str | Type::File => self.free_str_var(&key),
+                        Type::Array(_) => self.free_array_var(&key),
                         _ => {}
                     }
                 }
@@ -904,10 +1215,74 @@ impl<'ctx> Codegen<'ctx> {
                 // what it points at.
                 match *ty {
                     Type::BigNum(_) => self.free_bignum_var(&key),
-                    Type::Str => self.free_str_var(&key),
+                    Type::Str | Type::File => self.free_str_var(&key),
+                    Type::Array(_) => self.free_array_var(&key),
                     _ => {}
                 }
                 self.builder.build_store(ptr, value).unwrap();
+            }
+            Stmt::ArrayIndexAssign(name, ty, index, value_expr) => {
+                let elem = match *ty {
+                    Type::Array(elem) => elem,
+                    other => panic!("ArrayIndexAssign on non-array type {other:?} -- should have been caught by the type checker"),
+                };
+                let key = (name.clone(), *ty);
+                let (ptr, llvm_ty) = *self
+                    .variables
+                    .get(&key)
+                    .ok_or_else(|| format!("undefined variable '{name}' of type {ty:?}"))?;
+                let array_value = self.builder.build_load(llvm_ty, ptr, name).unwrap();
+                let handle = self.unwrap_bignum_ptr(array_value);
+                let index_value = self.compile_expr(index)?.into_float_value();
+                let index_i64 = self
+                    .builder
+                    .build_float_to_signed_int(index_value, self.context.i64_type(), "array_assign_index_i64")
+                    .unwrap();
+                let slot_ptr = self
+                    .builder
+                    .build_call(self.array_get_ptr_fn, &[handle.into(), index_i64.into()], "array_assign_get_ptr")
+                    .unwrap()
+                    .try_as_basic_value()
+                    .basic()
+                    .unwrap()
+                    .into_pointer_value();
+
+                let elem_ty = elem.as_type();
+                let new_value = self.compile_and_coerce(value_expr, elem_ty)?;
+
+                // The new value is always an independent copy (same
+                // "always copy on store" rule as everywhere else), so it's
+                // safe to free whatever the slot held *before* storing the
+                // new value over it.
+                let elem_llvm_ty = self.basic_type(elem_ty);
+                match elem {
+                    ElementType::Str | ElementType::File => {
+                        let old_ptr = self.builder.build_load(elem_llvm_ty, slot_ptr, "array_assign_old").unwrap();
+                        self.builder.build_call(self.libc_free, &[old_ptr.into()], "array_assign_old_free_call").unwrap();
+                    }
+                    ElementType::BigNum(_) => {
+                        let old_wrapped = self.builder.build_load(elem_llvm_ty, slot_ptr, "array_assign_old").unwrap();
+                        let old_ptr = self.unwrap_bignum_ptr(old_wrapped);
+                        self.free_bignum_ptr(old_ptr);
+                    }
+                    ElementType::Num(_) | ElementType::NumW(_) | ElementType::Bool => {}
+                }
+
+                self.builder.build_store(slot_ptr, new_value).unwrap();
+            }
+            Stmt::Append(array_expr, value_expr) => {
+                let elem = Self::array_element_type_of(array_expr);
+                let array_value = self.compile_expr(array_expr)?;
+                let handle = self.unwrap_bignum_ptr(array_value);
+
+                let elem_ty = elem.as_type();
+                let value = self.compile_and_coerce(value_expr, elem_ty)?;
+                let elem_llvm_ty = self.basic_type(elem_ty);
+                let value_slot = self.entry_alloca(elem_llvm_ty, "append_value_slot");
+                self.builder.build_store(value_slot, value).unwrap();
+                self.builder
+                    .build_call(self.array_append_fn, &[handle.into(), value_slot.into()], "append_call")
+                    .unwrap();
             }
             Stmt::Return(expr) => {
                 // Coerced (via compile_and_coerce, so a bare bignum literal
@@ -954,13 +1329,14 @@ impl<'ctx> Codegen<'ctx> {
                     .rev()
                     .flat_map(|frame| frame.iter().rev())
                     .map(ScopeEntry::key)
-                    .filter(|key| matches!(key.1, Type::BigNum(_) | Type::Str | Type::File))
+                    .filter(|key| matches!(key.1, Type::BigNum(_) | Type::Str | Type::File | Type::Array(_)))
                     .cloned()
                     .collect();
                 for key in &to_free {
                     match key.1 {
                         Type::BigNum(_) => self.free_bignum_var(key),
                         Type::Str | Type::File => self.free_str_var(key),
+                        Type::Array(_) => self.free_array_var(key),
                         _ => unreachable!(),
                     }
                 }
@@ -1325,6 +1701,52 @@ impl<'ctx> Codegen<'ctx> {
             Expr::Call(name, args) => self
                 .compile_call(name, args)?
                 .expect("function used in expression position must return a value"),
+            Expr::ArrayLiteral(_) => {
+                panic!("array literal must be compiled via compile_and_coerce with a known target type")
+            }
+            Expr::ArrayIndex(name, ty, index) => {
+                let elem = match ty {
+                    Type::Array(elem) => *elem,
+                    other => panic!("ArrayIndex on non-array type {other:?} -- should have been caught by the type checker"),
+                };
+                let (ptr, llvm_ty) = *self
+                    .variables
+                    .get(&(name.clone(), *ty))
+                    .ok_or_else(|| format!("undefined variable '{name}' of type {ty:?}"))?;
+                let array_value = self.builder.build_load(llvm_ty, ptr, name).unwrap();
+                let handle = self.unwrap_bignum_ptr(array_value);
+                let index_value = self.compile_expr(index)?.into_float_value();
+                let index_i64 = self
+                    .builder
+                    .build_float_to_signed_int(index_value, self.context.i64_type(), "array_index_i64")
+                    .unwrap();
+                let slot_ptr = self
+                    .builder
+                    .build_call(self.array_get_ptr_fn, &[handle.into(), index_i64.into()], "array_index_get_ptr")
+                    .unwrap()
+                    .try_as_basic_value()
+                    .basic()
+                    .unwrap()
+                    .into_pointer_value();
+                let elem_llvm_ty = self.basic_type(elem.as_type());
+                self.builder.build_load(elem_llvm_ty, slot_ptr, "array_index_load").unwrap()
+            }
+            Expr::Length(array_expr) => {
+                let array_value = self.compile_expr(array_expr)?;
+                let handle = self.unwrap_bignum_ptr(array_value);
+                let length_i64 = self
+                    .builder
+                    .build_call(self.array_length_fn, &[handle.into()], "length_call")
+                    .unwrap()
+                    .try_as_basic_value()
+                    .basic()
+                    .unwrap()
+                    .into_int_value();
+                self.builder
+                    .build_signed_int_to_float(length_i64, self.context.f64_type(), "length_as_num")
+                    .unwrap()
+                    .into()
+            }
         })
     }
 
@@ -1748,5 +2170,26 @@ impl<'ctx> Codegen<'ctx> {
             .unwrap()
             .get_parent()
             .unwrap()
+    }
+
+    /// Builds `alloca` in the current function's *entry* block rather than
+    /// wherever the builder currently sits. An `alloca` instruction that
+    /// lives inside a runtime loop's body block is a genuine dynamic
+    /// stack allocation on every iteration -- LLVM only reclaims it when
+    /// the function returns, not at the end of that loop body -- so scratch
+    /// space needed fresh each iteration (an array-copy/append element
+    /// staging slot, for instance) must live in the entry block instead,
+    /// allocated exactly once no matter how many times the surrounding
+    /// code runs. Restores the builder's position afterward.
+    fn entry_alloca(&self, ty: BasicTypeEnum<'ctx>, name: &str) -> PointerValue<'ctx> {
+        let current_block = self.builder.get_insert_block().unwrap();
+        let entry = current_block.get_parent().unwrap().get_first_basic_block().unwrap();
+        match entry.get_first_instruction() {
+            Some(first) => self.builder.position_before(&first),
+            None => self.builder.position_at_end(entry),
+        }
+        let alloca = self.builder.build_alloca(ty, name).unwrap();
+        self.builder.position_at_end(current_block);
+        alloca
     }
 }

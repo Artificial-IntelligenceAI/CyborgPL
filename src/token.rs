@@ -44,6 +44,10 @@ pub enum Token {
     /// `[from*(dest)*]` -- the file-source clause `input:` (optionally)
     /// can take, reading its whole content instead of a line from stdin.
     From,
+    /// `append*(array), (value)*;` -- grows an array by one element.
+    Append,
+    /// `length*(array)*` -- an array's element count, as a value.
+    Length,
     /// Marks the start of the program's entry point block (replaces `fn main`).
     Start,
     End,
@@ -112,6 +116,8 @@ impl Token {
             "overwrite" => Some(Token::Overwrite),
             "to" => Some(Token::To),
             "from" => Some(Token::From),
+            "append" => Some(Token::Append),
+            "length" => Some(Token::Length),
             "not" => Some(Token::Not),
             "START" => Some(Token::Start),
             "END" => Some(Token::End),

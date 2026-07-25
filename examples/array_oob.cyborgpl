@@ -1,0 +1,5 @@
+START
+var:array:num 'nums' = {(1), (2), (3)};
+print*"about to go out of range"*;
+print*(ref:var:array:num 'nums'*(4)*)*;
+END

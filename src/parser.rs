@@ -90,6 +90,7 @@ impl Parser {
     }
 
     fn parse_type(&mut self) -> PResult<Type> {
+        let line = self.tokens[self.pos].line;
         let name = self.expect_ident()?;
         match name.as_str() {
             "num" => Ok(Type::Num(DEFAULT_NUM_PRECISION)),
@@ -98,6 +99,19 @@ impl Parser {
             "str" => Ok(Type::Str),
             "bignum" => Ok(Type::BigNum(DEFAULT_BIGNUM_PRECISION)),
             "file" => Ok(Type::File),
+            // `array:elem_type`, e.g. `array:num`, `array:str` -- the
+            // element type is parsed with the exact same grammar a bare
+            // type would be (including its own `[precision:N]`, e.g.
+            // `array:num[precision:32]`), just recursively.
+            "array" => {
+                self.expect(Token::Colon)?;
+                let elem_ty = self.parse_type()?;
+                let elem_ty = self.parse_optional_precision(elem_ty)?;
+                let elem = ElementType::from_type(elem_ty).ok_or_else(|| {
+                    format!("line {line}: array elements can't themselves be {elem_ty} (no nested arrays)")
+                })?;
+                Ok(Type::Array(elem))
+            }
             other => Err(format!("unknown type '{other}'")),
         }
     }
@@ -306,6 +320,7 @@ impl Parser {
                 // is wrapped in ( )" rule the RHS and everything else now
                 // follows.
                 let (name, ty) = self.parse_ref_var()?;
+                let index = self.parse_optional_array_index()?;
                 if self.check(&Token::Eq) {
                     self.advance();
                     let value = match self.try_parse_numw_literal(ty)? {
@@ -313,10 +328,16 @@ impl Parser {
                         None => self.parse_expr()?,
                     };
                     self.expect(Token::Semicolon)?;
-                    return Ok(Stmt::Assign(name, ty, value));
+                    return match index {
+                        Some(index) => Ok(Stmt::ArrayIndexAssign(name, ty, index, value)),
+                        None => Ok(Stmt::Assign(name, ty, value)),
+                    };
                 }
                 self.expect(Token::Semicolon)?;
-                Ok(Stmt::ExprStmt(Expr::Var(name, ty)))
+                match index {
+                    Some(index) => Ok(Stmt::ExprStmt(Expr::ArrayIndex(name, ty, Box::new(index)))),
+                    None => Ok(Stmt::ExprStmt(Expr::Var(name, ty))),
+                }
             }
             Token::Return => {
                 self.advance();
@@ -353,6 +374,17 @@ impl Parser {
                 };
                 self.expect(Token::Semicolon)?;
                 Ok(Stmt::Overwrite(segments, dest))
+            }
+            // `append*(array), (value)*;` -- grows an array by one element.
+            Token::Append => {
+                self.advance();
+                self.expect(Token::Star)?;
+                let array = self.parse_expr()?;
+                self.expect(Token::Comma)?;
+                let value = self.parse_expr()?;
+                self.expect(Token::Star)?;
+                self.expect(Token::Semicolon)?;
+                Ok(Stmt::Append(array, value))
             }
             Token::If => {
                 self.advance();
@@ -552,6 +584,25 @@ impl Parser {
             Token::Ref if self.tokens.get(self.pos + 2).map(|t| &t.token) == Some(&Token::Func) => {
                 self.parse_func_call()
             }
+            // `{(v1), (v2), ...}` -- an array literal, each element
+            // individually wrapped like any other value. Exempt from
+            // needing an extra outer `( )` wrap, same as a function call.
+            Token::LBrace => {
+                self.advance();
+                let mut elements = Vec::new();
+                if !self.check(&Token::RBrace) {
+                    loop {
+                        elements.push(self.parse_expr()?);
+                        if self.check(&Token::Comma) {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                self.expect(Token::RBrace)?;
+                Ok(Expr::ArrayLiteral(elements))
+            }
             other => Err(format!(
                 "line {}: every value must be wrapped in parens -- e.g. (5), (ref:var:num 'x') -- found {:?}",
                 self.tokens[self.pos].line, other
@@ -585,7 +636,19 @@ impl Parser {
             // the same name can be shared by variables of different types.
             Token::Ref => {
                 let (name, ty) = self.parse_ref_var()?;
-                Ok(Expr::Var(name, ty))
+                match self.parse_optional_array_index()? {
+                    Some(index) => Ok(Expr::ArrayIndex(name, ty, Box::new(index))),
+                    None => Ok(Expr::Var(name, ty)),
+                }
+            }
+            // `length*(array)*` -- still needs its own outer `( )` wrap
+            // like any other value (unlike a function call, which doesn't).
+            Token::Length => {
+                self.advance();
+                self.expect(Token::Star)?;
+                let array = self.parse_expr()?;
+                self.expect(Token::Star)?;
+                Ok(Expr::Length(Box::new(array)))
             }
             other => Err(format!(
                 "line {}: expected a value (a number, string, true/false, or ref:var:TYPE 'name') inside '(', found {:?}",
@@ -607,6 +670,22 @@ impl Parser {
         let ty = self.parse_optional_precision(ty)?;
         let name = self.expect_quoted_ident()?;
         Ok((name, ty))
+    }
+
+    /// Parses an optional `*(index)*` suffix right after a
+    /// `ref:var:array:...` reference -- present for single-element access
+    /// (`ref:var:array:num 'nums'*(1)*`), absent for a whole-array
+    /// reference. Doesn't check the declared type is actually an array;
+    /// that's the type checker's job, same division of labor already used
+    /// for `input:`/`clock:`'s type restrictions.
+    fn parse_optional_array_index(&mut self) -> PResult<Option<Expr>> {
+        if !self.check(&Token::Star) {
+            return Ok(None);
+        }
+        self.advance();
+        let index = self.parse_expr()?;
+        self.expect(Token::Star)?;
+        Ok(Some(index))
     }
 
     /// Parses `ref:func 'name'*arg, arg, ...*` -- the only way to call a
