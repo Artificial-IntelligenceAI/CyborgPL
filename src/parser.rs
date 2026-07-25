@@ -587,22 +587,7 @@ impl Parser {
             // `{(v1), (v2), ...}` -- an array literal, each element
             // individually wrapped like any other value. Exempt from
             // needing an extra outer `( )` wrap, same as a function call.
-            Token::LBrace => {
-                self.advance();
-                let mut elements = Vec::new();
-                if !self.check(&Token::RBrace) {
-                    loop {
-                        elements.push(self.parse_expr()?);
-                        if self.check(&Token::Comma) {
-                            self.advance();
-                        } else {
-                            break;
-                        }
-                    }
-                }
-                self.expect(Token::RBrace)?;
-                Ok(Expr::ArrayLiteral(elements))
-            }
+            Token::LBrace => self.parse_array_literal(),
             other => Err(format!(
                 "line {}: every value must be wrapped in parens -- e.g. (5), (ref:var:num 'x') -- found {:?}",
                 self.tokens[self.pos].line, other
@@ -641,12 +626,14 @@ impl Parser {
                     None => Ok(Expr::Var(name, ty)),
                 }
             }
-            // `length*(array)*` -- still needs its own outer `( )` wrap
-            // like any other value (unlike a function call, which doesn't).
+            // `length*array*` -- still needs its own outer `( )` wrap like
+            // any other value (unlike a function call, which doesn't), but
+            // the array argument itself doesn't need a *second*, inner
+            // wrap -- see parse_length_argument.
             Token::Length => {
                 self.advance();
                 self.expect(Token::Star)?;
-                let array = self.parse_expr()?;
+                let array = self.parse_length_argument()?;
                 self.expect(Token::Star)?;
                 Ok(Expr::Length(Box::new(array)))
             }
@@ -686,6 +673,58 @@ impl Parser {
         let index = self.parse_expr()?;
         self.expect(Token::Star)?;
         Ok(Some(index))
+    }
+
+    /// `{(v1), (v2), ...}` -- an array literal, each element individually
+    /// wrapped like any other value. Exempt from needing an extra outer
+    /// `( )` wrap, same as a function call. Shared by `parse_primary` (a
+    /// literal used as a value) and `parse_length_argument` below.
+    fn parse_array_literal(&mut self) -> PResult<Expr> {
+        self.expect(Token::LBrace)?;
+        let mut elements = Vec::new();
+        if !self.check(&Token::RBrace) {
+            loop {
+                elements.push(self.parse_expr()?);
+                if self.check(&Token::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+        }
+        self.expect(Token::RBrace)?;
+        Ok(Expr::ArrayLiteral(elements))
+    }
+
+    /// Parses `length`'s single argument -- always an array-typed
+    /// expression, so unlike every other value position it doesn't need
+    /// its own `( )` wrap. A bare `ref:var:array:TYPE 'name'` reference
+    /// can never sensibly take a trailing `*(index)*` *here* anyway
+    /// (indexing narrows to one scalar element, and `length` needs a
+    /// whole array), so skipping `parse_optional_array_index` for this
+    /// one case costs no expressiveness -- and is exactly what removes
+    /// the ambiguity a wrap would otherwise be needed to resolve (without
+    /// it, `length`'s own closing `*` would be indistinguishable from the
+    /// start of an index suffix on the reference). A bare `{...}` array
+    /// literal is deliberately not accepted here -- its element type is
+    /// only recoverable from a known target type (a `var:array:TYPE`
+    /// declaration, a return, a call argument), and `length`'s argument
+    /// position isn't one of those, so it would always fail type-checking
+    /// anyway; store it in a variable first instead.
+    fn parse_length_argument(&mut self) -> PResult<Expr> {
+        match self.peek().clone() {
+            Token::Ref if self.tokens.get(self.pos + 2).map(|t| &t.token) == Some(&Token::Func) => {
+                self.parse_func_call()
+            }
+            Token::Ref => {
+                let (name, ty) = self.parse_ref_var()?;
+                Ok(Expr::Var(name, ty))
+            }
+            other => Err(format!(
+                "line {}: length*...* expects an array reference or call, found {:?}",
+                self.tokens[self.pos].line, other
+            )),
+        }
     }
 
     /// Parses `ref:func 'name'*arg, arg, ...*` -- the only way to call a
