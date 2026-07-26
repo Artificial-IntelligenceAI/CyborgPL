@@ -411,7 +411,15 @@ impl<'ctx> Codegen<'ctx> {
 
     /// Lower the LLVM IR built up so far into a native `.o` object file,
     /// targeting whatever machine this compiler itself is running on.
-    pub fn write_object_file(&self, path: &Path) -> Result<(), String> {
+    /// `optimize: false` (the CLI's `-O0`) skips LLVM's optimizer
+    /// entirely -- not just "beyond mem2reg", genuinely nothing at all,
+    /// the same real `-O0` meaning every other compiler (clang, rustc,
+    /// gcc) already uses: raw alloca/store/load exactly as codegen
+    /// emitted it, and every loop actually runs every iteration rather
+    /// than the optimizer proving some of them away. Useful for an
+    /// honest look at what a program's code/timing genuinely is, without
+    /// LLVM quietly doing (or undoing) work on your behalf.
+    pub fn write_object_file(&self, path: &Path, optimize: bool) -> Result<(), String> {
         Target::initialize_native(&InitializationConfig::default())?;
 
         let triple = TargetMachine::get_default_triple();
@@ -419,15 +427,9 @@ impl<'ctx> Codegen<'ctx> {
         let cpu = TargetMachine::get_host_cpu_name().to_string();
         let features = TargetMachine::get_host_cpu_features().to_string();
 
+        let opt_level = if optimize { OptimizationLevel::Default } else { OptimizationLevel::None };
         let target_machine = target
-            .create_target_machine(
-                &triple,
-                &cpu,
-                &features,
-                OptimizationLevel::Default,
-                RelocMode::PIC,
-                CodeModel::Default,
-            )
+            .create_target_machine(&triple, &cpu, &features, opt_level, RelocMode::PIC, CodeModel::Default)
             .ok_or("failed to create target machine for this host")?;
 
         // The full standard -O2 pipeline (mem2reg/SROA, inlining, GVN,
@@ -439,9 +441,11 @@ impl<'ctx> Codegen<'ctx> {
         // unlike this project's own targeted optimizations (bignum chain
         // fusion, literal hoisting, etc.), which each only help the
         // specific pattern they were built for.
-        self.module
-            .run_passes("default<O2>", &target_machine, PassBuilderOptions::create())
-            .map_err(|e| e.to_string())?;
+        if optimize {
+            self.module
+                .run_passes("default<O2>", &target_machine, PassBuilderOptions::create())
+                .map_err(|e| e.to_string())?;
+        }
 
         target_machine
             .write_to_file(&self.module, FileType::Object, path)

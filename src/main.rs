@@ -42,7 +42,12 @@ const DEFAULT_SOURCE: &str = r#"
 "#;
 
 fn main() {
-    let path = std::env::args().nth(1);
+    // `-O0` disables LLVM's optimizer entirely (see write_object_file) --
+    // recognized anywhere among the arguments, order-independent with the
+    // source file path, matching how every other compiler's flags work.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let optimize = !args.iter().any(|a| a == "-O0");
+    let path = args.iter().find(|a| a.as_str() != "-O0").cloned();
     let source = match &path {
         Some(path) => std::fs::read_to_string(path).unwrap_or_else(|e| {
             eprintln!("failed to read {path}: {e}");
@@ -81,7 +86,7 @@ fn main() {
     let obj_path = Path::new("/tmp/cyborgpl_out.o");
     let bin_path = Path::new("/tmp/cyborgpl_out");
 
-    if let Err(e) = codegen.write_object_file(obj_path) {
+    if let Err(e) = codegen.write_object_file(obj_path, optimize) {
         eprintln!("codegen error: {e}");
         std::process::exit(1);
     }

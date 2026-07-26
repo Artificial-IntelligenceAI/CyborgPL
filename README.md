@@ -50,6 +50,12 @@ Running with no file argument compiles a small built-in demo instead:
 cargo run
 ```
 
+Pass `-O0` (anywhere among the arguments) to disable LLVM's optimizer entirely, for an honest look at a program's real, unoptimized behavior/timing:
+
+```bash
+cargo run -- examples/hello.cyborgpl -O0
+```
+
 ## Examples
 
 ```
