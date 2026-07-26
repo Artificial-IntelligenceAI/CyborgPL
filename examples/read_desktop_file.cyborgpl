@@ -1,6 +1,0 @@
-START
-
-print*"reading ~/Desktop/cyborgpl_note.txt:"*;
-read*("/Users/ts/Desktop/cyborgpl_note.txt")*;
-
-END
