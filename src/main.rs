@@ -41,25 +41,80 @@ const DEFAULT_SOURCE: &str = r#"
     END
 "#;
 
-/// A `name.cyborgpl` file's settings live in a sibling `name.cyborgsettings`
-/// file in the same directory -- not a CLI flag, so a program's settings
-/// travel with it as its own file rather than however it happens to be
-/// invoked. Each line is `setting.value` (e.g. `optimize.false`); blank
-/// lines are skipped. Missing file entirely means every default applies
-/// (currently just `optimize`, defaulting to `true`). An unrecognized
-/// setting name or a value that isn't `true`/`false` is a hard error --
-/// the same "loud failure over silently wrong behavior" precedent every
-/// other part of this compiler already follows (a crash on a typo, not a
-/// silently-ignored setting), which matters especially here since a
-/// silently-ignored optimize setting would look identical to it working.
-fn read_optimize_setting(source_path: &str) -> bool {
-    let settings_path = Path::new(source_path).with_extension("cyborgsettings");
-    let Ok(contents) = std::fs::read_to_string(&settings_path) else {
+/// A `.cyborgsettings` file only takes effect if the `.cyborgpl` program
+/// explicitly names it via a top-level `linkto*("...")*;` directive --
+/// there's no automatic discovery by filename convention, so a settings
+/// file can never influence a program without that program's own source
+/// asking for it by path. The settings file must consent back: its first
+/// line must be `allow.link*("...")*`, naming the exact `.cyborgpl` file
+/// linking to it. Both paths are canonicalized and compared, so either
+/// side naming the wrong file (or a file that doesn't exist) is a hard
+/// error -- "loud failure over silently wrong behavior", same precedent
+/// as everywhere else in this compiler, and especially important here
+/// since a silently-ignored or silently-mismatched link would look
+/// identical to it working correctly.
+///
+/// After the handshake, the rest of the settings file uses the existing
+/// `setting.value` format (e.g. `optimize.false`); blank lines are
+/// skipped. An unrecognized setting name or bad value is also a hard
+/// error.
+fn resolve_optimize_setting(link_to: &Option<String>, source_path: Option<&str>) -> bool {
+    let Some(link_to) = link_to else {
+        // No linkto*(...)*; directive -- no settings file loads at all,
+        // regardless of what happens to sit next to the source file.
         return true;
     };
+    let Some(source_path) = source_path else {
+        eprintln!("linkto*(...)*; requires a source file on disk (not the built-in default program)");
+        std::process::exit(1);
+    };
+
+    let source_path = Path::new(source_path);
+    let source_dir = source_path.parent().unwrap_or_else(|| Path::new("."));
+    let settings_path = source_dir.join(link_to);
+
+    let Ok(contents) = std::fs::read_to_string(&settings_path) else {
+        eprintln!("linkto*(...)*; names {}, which doesn't exist or can't be read", settings_path.display());
+        std::process::exit(1);
+    };
+
+    let mut lines = contents.lines().enumerate();
+    let Some((_, first_line)) = lines.next() else {
+        eprintln!(
+            "{}: expected 'allow.link*(\"...\")*' as the first line, found an empty file",
+            settings_path.display()
+        );
+        std::process::exit(1);
+    };
+    let allowed = parse_allow_link(first_line, &settings_path);
+
+    let settings_dir = settings_path.parent().unwrap_or_else(|| Path::new("."));
+    let allowed_path = settings_dir.join(&allowed);
+
+    let source_canon = std::fs::canonicalize(source_path).unwrap_or_else(|e| {
+        eprintln!("{}: {e}", source_path.display());
+        std::process::exit(1);
+    });
+    let allowed_canon = std::fs::canonicalize(&allowed_path).unwrap_or_else(|e| {
+        eprintln!(
+            "{}: allow.link*(...)*; names {}, which doesn't exist or can't be read: {e}",
+            settings_path.display(),
+            allowed_path.display()
+        );
+        std::process::exit(1);
+    });
+    if source_canon != allowed_canon {
+        eprintln!(
+            "{}: allow.link*(...)*; names {}, which doesn't match the file linking to it, {}",
+            settings_path.display(),
+            allowed_path.display(),
+            source_path.display()
+        );
+        std::process::exit(1);
+    }
 
     let mut optimize = true;
-    for (i, line) in contents.lines().enumerate() {
+    for (i, line) in lines {
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -96,9 +151,34 @@ fn read_optimize_setting(source_path: &str) -> bool {
     optimize
 }
 
+/// Parses a `.cyborgsettings` file's required first line, `allow.link*("...")*`,
+/// returning the quoted path. Mirrors the quoted-string-literal convention
+/// `linkto*(...)*;` uses on the `.cyborgpl` side, for consistency.
+fn parse_allow_link(line: &str, settings_path: &Path) -> String {
+    let fail = |detail: &str| -> ! {
+        eprintln!(
+            "{}: line 1: expected 'allow.link*(\"filepath\")*' as the first line, {detail}",
+            settings_path.display()
+        );
+        std::process::exit(1);
+    };
+
+    let line = line.trim();
+    let Some(rest) = line.strip_prefix("allow.link*(") else {
+        fail(&format!("found {line:?}"));
+    };
+    let Some(rest) = rest.strip_suffix(")*") else {
+        fail(&format!("found {line:?}"));
+    };
+    let rest = rest.trim();
+    let Some(path) = rest.strip_prefix('"').and_then(|s| s.strip_suffix('"')) else {
+        fail(&format!("path must be a quoted string, found {rest:?}"));
+    };
+    path.to_string()
+}
+
 fn main() {
     let path = std::env::args().nth(1);
-    let optimize = path.as_deref().map_or(true, read_optimize_setting);
     let source = match &path {
         Some(path) => std::fs::read_to_string(path).unwrap_or_else(|e| {
             eprintln!("failed to read {path}: {e}");
@@ -116,6 +196,8 @@ fn main() {
         eprintln!("parse error: {e}");
         std::process::exit(1);
     });
+
+    let optimize = resolve_optimize_setting(&program.link_to, path.as_deref());
 
     if let Err(errors) = TypeChecker::check_program(&program) {
         for e in &errors {

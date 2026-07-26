@@ -51,6 +51,11 @@ pub enum Token {
     /// `read*(source)*;` -- reads a file's whole content and prints it
     /// directly, with no variable declared in between.
     Read,
+    /// `linkto*(filepath)*;` -- a top-level directive naming the
+    /// `.cyborgsettings` file this program consents to being configured
+    /// by. Not inside `START...END` or any `func` -- its own top-level
+    /// item, alongside them.
+    LinkTo,
     /// Marks the start of the program's entry point block (replaces `fn main`).
     Start,
     End,
@@ -127,6 +132,7 @@ impl Token {
             "append" => Some(Token::Append),
             "length" => Some(Token::Length),
             "read" => Some(Token::Read),
+            "linkto" => Some(Token::LinkTo),
             "not" => Some(Token::Not),
             "START" => Some(Token::Start),
             "END" => Some(Token::End),

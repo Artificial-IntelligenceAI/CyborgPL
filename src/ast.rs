@@ -315,4 +315,13 @@ pub struct Program {
     pub functions: Vec<Function>,
     /// The statements between `START` and `END` — the program's real entry point.
     pub entry: Block,
+    /// `linkto*(filepath)*;` -- a top-level directive (alongside `func`/
+    /// `START`, not inside either) naming a `.cyborgsettings` file this
+    /// program consents to being configured by. `None` means no settings
+    /// file is loaded at all, regardless of what files happen to sit
+    /// next to this one -- deliberately not automatic, so a settings
+    /// file can never affect a program without that program's own source
+    /// explicitly asking for it by path. Literal string only for now, no
+    /// variable support.
+    pub link_to: Option<String>,
 }

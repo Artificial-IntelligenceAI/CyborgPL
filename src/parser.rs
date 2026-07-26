@@ -17,6 +17,7 @@ impl Parser {
     pub fn parse_program(&mut self) -> PResult<Program> {
         let mut functions = Vec::new();
         let mut entry: Option<Block> = None;
+        let mut link_to: Option<String> = None;
 
         while !self.check(&Token::Eof) {
             match self.peek() {
@@ -30,9 +31,39 @@ impl Parser {
                     }
                     entry = Some(self.parse_entry()?);
                 }
+                // `linkto*(filepath)*;` -- a top-level directive, not
+                // inside START/func, naming the .cyborgsettings file this
+                // program consents to being configured by. Only a literal
+                // string path is accepted for now, no variable support --
+                // main.rs needs this resolved before compilation proceeds
+                // at all (it decides things like whether to optimize),
+                // and a value only known at runtime couldn't serve that.
+                Token::LinkTo => {
+                    if link_to.is_some() {
+                        return Err(format!(
+                            "line {}: only one linkto*(...)*; directive is allowed",
+                            self.tokens[self.pos].line
+                        ));
+                    }
+                    let line = self.tokens[self.pos].line;
+                    self.advance();
+                    self.expect(Token::Star)?;
+                    let expr = self.parse_expr()?;
+                    let path = match expr {
+                        Expr::Str(s) => s,
+                        _ => {
+                            return Err(format!(
+                                "line {line}: linkto*(...)*; only supports a literal string path for now"
+                            ));
+                        }
+                    };
+                    self.expect(Token::Star)?;
+                    self.expect(Token::Semicolon)?;
+                    link_to = Some(path);
+                }
                 other => {
                     return Err(format!(
-                        "line {}: expected 'func' or 'START', found {:?}",
+                        "line {}: expected 'func', 'START', or 'linkto', found {:?}",
                         self.tokens[self.pos].line, other
                     ));
                 }
@@ -41,7 +72,7 @@ impl Parser {
 
         let entry = entry
             .ok_or_else(|| "program is missing a START...END entry point".to_string())?;
-        Ok(Program { functions, entry })
+        Ok(Program { functions, entry, link_to })
     }
 
     fn parse_entry(&mut self) -> PResult<Block> {

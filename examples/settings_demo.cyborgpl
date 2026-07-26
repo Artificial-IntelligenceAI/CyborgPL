@@ -1,3 +1,5 @@
+linkto*("settings_demo.cyborgsettings")*;
+
 START
 
 clock:num 'start';
