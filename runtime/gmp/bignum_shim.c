@@ -11,90 +11,65 @@
 // consumed it (printf, or `stch`) is done reading it.
 
 #include <gmp.h>
+#include <mimalloc.h>
 #include <stdlib.h>
 
 // Every `bignum` value costs *two* heap allocations at construction: the
 // `mpf_t` wrapper malloc'd below, and GMP's own internal limb-buffer
 // allocation inside `mpf_init2`. Both get freed and immediately
 // reallocated at the same size constantly (any repeated construct/use/
-// free cycle at a given precision), so a size-bucketed freelist pool
-// -- reusing an already-freed block of the right size instead of asking
-// the system allocator again -- cuts that cost dramatically. Measured
-// standalone (not a guess) before implementing: ~5-8x faster than plain
-// malloc/free for a tight construct-use-free loop, landing within ~1-2x
-// of the theoretical floor (doing no allocation at all). A pooled block
-// is never returned to the OS once freed -- it stays reserved for reuse
-// at that same size for the rest of the program's life, the one real
-// tradeoff versus plain malloc/free (a program with a brief burst of
-// many live bignums, then very few, keeps that memory reserved
-// afterward instead of giving it back).
+// free cycle at a given precision), so reusing already-freed memory
+// instead of asking the system allocator fresh every time cuts that
+// cost dramatically -- measured standalone (not a guess) before
+// choosing this approach: roughly 5-8x faster than plain malloc/free
+// for a tight construct-use-free loop, landing within ~1-2x of the
+// theoretical floor (doing no allocation at all).
 //
-// Buckets are found by a linear scan keyed on requested size -- correct
-// for any number of distinct precisions a program uses, and fast enough
-// in practice since that count is always small (bounded by how many
-// distinct `[precision:N]` values appear in the source, not by how many
-// bignums are ever constructed).
-typedef struct pool_bucket {
-    size_t size;
-    void *freelist; // each free block's own first word points to the next
-    struct pool_bucket *next_bucket;
-} pool_bucket;
-
-static pool_bucket *pool_buckets = NULL;
-
-static pool_bucket *pool_bucket_for(size_t size) {
-    for (pool_bucket *b = pool_buckets; b; b = b->next_bucket) {
-        if (b->size == size) {
-            return b;
-        }
-    }
-    pool_bucket *b = malloc(sizeof(pool_bucket));
-    b->size = size;
-    b->freelist = NULL;
-    b->next_bucket = pool_buckets;
-    pool_buckets = b;
-    return b;
-}
-
-static void *pool_alloc(size_t size) {
-    pool_bucket *b = pool_bucket_for(size);
-    if (b->freelist) {
-        void *block = b->freelist;
-        b->freelist = *(void **)block;
-        return block;
-    }
-    return malloc(size);
-}
-
-// GMP only ever calls this to grow a buffer within one still-live
-// allocation (never observed in practice for a fixed-precision `mpf_t`
-// whose size never changes after `mpf_init2` -- nothing here calls
-// `mpf_set_prec`) -- not a hot path, so it isn't pooled, just delegated
-// to the system allocator directly.
-static void *pool_realloc(void *ptr, size_t old_size, size_t new_size) {
+// An earlier version of this hand-rolled its own size-bucketed freelist
+// pool, but that pool never returned memory to the OS once cached --
+// fine for CyborgPL's current short, run-to-completion programs, but a
+// real problem the moment a longer-running construct (a timer, an
+// event loop) exists: a brief burst of many live `bignum`s would keep
+// that peak memory reserved for the rest of the process's life.
+// Neither Rust nor GMP solve this themselves (both just delegate to
+// the system allocator by default) -- the standard fix in that
+// situation, well-proven elsewhere (e.g. TiKV's `tikv-jemallocator`),
+// is to swap in a general-purpose allocator with *decay-based*
+// reclamation: freed memory is cached for reuse the same way, but
+// automatically released back to the OS if it goes unused for a
+// while, with no explicit trim call needed anywhere in this file or
+// in codegen. mimalloc provides exactly that, so GMP's own allocator
+// hook is pointed directly at its `mi_malloc`/`mi_realloc`/`mi_free`
+// instead of a bespoke pool -- less code here, and the decay logic
+// has had far more real-world scrutiny than anything hand-rolled this
+// session.
+//
+// `mi_malloc`'s signature already matches `mp_set_memory_functions`'s
+// expected `alloc_func` exactly; only realloc/free need a thin
+// wrapper, since GMP's versions carry an extra size_t (the previous
+// allocation's size) mimalloc's own API doesn't need -- it tracks
+// each block's size internally.
+static void *gmp_realloc(void *ptr, size_t old_size, size_t new_size) {
     (void)old_size;
-    return realloc(ptr, new_size);
+    return mi_realloc(ptr, new_size);
 }
 
-static void pool_free(void *ptr, size_t size) {
-    pool_bucket *b = pool_bucket_for(size);
-    *(void **)ptr = b->freelist;
-    b->freelist = ptr;
+static void gmp_free(void *ptr, size_t size) {
+    (void)size;
+    mi_free(ptr);
 }
 
 // Installed before `main` even starts (a constructor, not called from
 // anywhere in codegen) so every GMP allocation for the whole program's
-// lifetime -- including the very first `bignum_new` -- goes through the
-// pool. CyborgPL programs are single-threaded (no concurrency
-// primitives exist in the language), so the unsynchronized freelists
-// above are safe.
+// lifetime -- including the very first `bignum_new` -- goes through
+// mimalloc.
 __attribute__((constructor))
-static void install_bignum_pool(void) {
-    mp_set_memory_functions(pool_alloc, pool_realloc, pool_free);
+static void install_bignum_allocator(void) {
+    mp_set_memory_functions(mi_malloc, gmp_realloc, gmp_free);
 }
 
 void *bignum_new(unsigned long precision_bits) {
-    mpf_t *x = pool_alloc(sizeof(mpf_t));
+    mpf_t *x = mi_malloc(sizeof(mpf_t));
     mpf_init2(*x, precision_bits);
     return x;
 }
@@ -177,7 +152,7 @@ long bignum_get_i64(void *x) {
 
 void bignum_free(void *x) {
     mpf_clear(*(mpf_t *)x);
-    pool_free(x, sizeof(mpf_t));
+    mi_free(x);
 }
 
 char *bignum_to_string(void *x) {

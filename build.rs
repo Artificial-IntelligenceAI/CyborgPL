@@ -29,14 +29,26 @@ fn main() {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_else(|| "/opt/homebrew/opt/gmp".to_string());
 
+    // mimalloc: backs bignum_shim.c's GMP allocator hook (see there) --
+    // same "ask Homebrew, don't hardcode a prefix" pattern as GMP above.
+    let mimalloc_prefix = std::process::Command::new("brew")
+        .args(["--prefix", "mimalloc"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "/opt/homebrew/opt/mimalloc".to_string());
+
     cc::Build::new()
         .file("runtime/gmp/bignum_shim.c")
         .include(format!("{gmp_prefix}/include"))
+        .include(format!("{mimalloc_prefix}/include"))
         .opt_level(2)
         .flag("-mmacosx-version-min=26.0")
         .compile("cyborgpl_bignum");
     println!("cargo:rustc-env=CYBORGPL_BIGNUM_LIB={out_dir}/libcyborgpl_bignum.a");
     println!("cargo:rustc-env=CYBORGPL_GMP_LIB_DIR={gmp_prefix}/lib");
+    println!("cargo:rustc-env=CYBORGPL_MIMALLOC_LIB_DIR={mimalloc_prefix}/lib");
     println!("cargo:rerun-if-changed=runtime/gmp/bignum_shim.c");
 
     cc::Build::new()

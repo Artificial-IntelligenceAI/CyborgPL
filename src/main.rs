@@ -95,6 +95,8 @@ fn main() {
         .arg(env!("CYBORGPL_BIGNUM_LIB")) // our GMP shim, for bignum
         .arg(format!("-L{}", env!("CYBORGPL_GMP_LIB_DIR")))
         .arg("-lgmp")
+        .arg(format!("-L{}", env!("CYBORGPL_MIMALLOC_LIB_DIR"))) // backs the GMP allocator hook in bignum_shim.c
+        .arg("-lmimalloc")
         .arg(env!("CYBORGPL_IO_LIB")) // our stdin shim, for input:str/input:num
         .arg(env!("CYBORGPL_CLOCK_LIB")) // our clock shim, for clock:num
         .arg(env!("CYBORGPL_ARRAY_LIB")) // our array shim, for var:array:TYPE
