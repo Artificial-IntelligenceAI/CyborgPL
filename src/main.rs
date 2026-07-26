@@ -5,7 +5,7 @@ mod parser;
 mod token;
 mod typecheck;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use inkwell::context::Context;
@@ -45,9 +45,13 @@ const DEFAULT_SOURCE: &str = r#"
 /// explicitly names it via a top-level `linkto*("...")*;` directive --
 /// there's no automatic discovery by filename convention, so a settings
 /// file can never influence a program without that program's own source
-/// asking for it by path. The settings file must consent back: its first
-/// line must be `allow.link*("...")*`, naming the exact `.cyborgpl` file
-/// linking to it. Both paths are canonicalized and compared, so either
+/// asking for it by path. Both `linkto`'s path and the settings file's own
+/// `allow.link` path must be absolute (a hard error otherwise) -- no
+/// relative-to-source-directory resolution, so a link always names one
+/// specific file unambiguously regardless of where either file lives.
+/// The settings file must consent back: its first line must be
+/// `allow.link*("...")*`, naming the exact `.cyborgpl` file linking to
+/// it. Both paths are canonicalized and compared, so either
 /// side naming the wrong file (or a file that doesn't exist) is a hard
 /// error -- "loud failure over silently wrong behavior", same precedent
 /// as everywhere else in this compiler, and especially important here
@@ -70,8 +74,11 @@ fn resolve_optimize_setting(link_to: &Option<String>, source_path: Option<&str>)
     };
 
     let source_path = Path::new(source_path);
-    let source_dir = source_path.parent().unwrap_or_else(|| Path::new("."));
-    let settings_path = source_dir.join(link_to);
+    if !Path::new(link_to).is_absolute() {
+        eprintln!("linkto*(...)*; requires an absolute filepath, found {link_to:?}");
+        std::process::exit(1);
+    }
+    let settings_path = PathBuf::from(link_to);
 
     let Ok(contents) = std::fs::read_to_string(&settings_path) else {
         eprintln!("linkto*(...)*; names {}, which doesn't exist or can't be read", settings_path.display());
@@ -87,9 +94,14 @@ fn resolve_optimize_setting(link_to: &Option<String>, source_path: Option<&str>)
         std::process::exit(1);
     };
     let allowed = parse_allow_link(first_line, &settings_path);
-
-    let settings_dir = settings_path.parent().unwrap_or_else(|| Path::new("."));
-    let allowed_path = settings_dir.join(&allowed);
+    if !Path::new(&allowed).is_absolute() {
+        eprintln!(
+            "{}: allow.link*(...)*; requires an absolute filepath, found {allowed:?}",
+            settings_path.display()
+        );
+        std::process::exit(1);
+    }
+    let allowed_path = PathBuf::from(&allowed);
 
     let source_canon = std::fs::canonicalize(source_path).unwrap_or_else(|e| {
         eprintln!("{}: {e}", source_path.display());

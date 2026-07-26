@@ -1,2 +1,2 @@
-allow.link*("settings_demo.cyborgpl")*
+allow.link*("/Users/ts/RustroverProjects/CyborgPL/examples/settings_demo.cyborgpl")*
 optimize.false

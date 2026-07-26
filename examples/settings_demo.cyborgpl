@@ -1,4 +1,5 @@
-linkto*("settings_demo.cyborgsettings")*;
+# Replace this with the absolute path to settings_demo.cyborgsettings on your own machine.
+linkto*("/Users/ts/RustroverProjects/CyborgPL/examples/settings_demo.cyborgsettings")*;
 
 START
 

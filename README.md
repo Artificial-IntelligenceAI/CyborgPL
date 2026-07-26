@@ -53,10 +53,10 @@ cargo run
 A `.cyborgpl` file's settings live in a separate `.cyborgsettings` file, linked in explicitly -- not a CLI flag, and not auto-discovered by filename convention, so a settings file can never affect a program without that program's own source asking for it by path:
 
 ```
-linkto*("name.cyborgsettings")*;
+linkto*("/absolute/path/to/name.cyborgsettings")*;
 ```
 
-as its own top-level line (alongside `func`/`START`, not inside either). The settings file must consent back, with `allow.link*("name.cyborgpl")*` as its required first line, naming the exact `.cyborgpl` file linking to it -- a mutual handshake, so neither file's say-so alone is enough. Any mismatch (missing file, wrong path on either side, malformed `allow.link` line) is a hard error, refusing to compile. `linkto`'s argument is a literal string only for now, no variables. After the handshake, the rest of the settings file is `setting.value` per line; currently the only recognized setting is `optimize` (`true`/`false`, default `true`), disabling LLVM's optimizer entirely when set to `false` -- for an honest look at a program's real, unoptimized behavior/timing. See `examples/settings_demo.cyborgpl` / `examples/settings_demo.cyborgsettings`. An unrecognized setting name, or a value that isn't `true`/`false`, is a hard error rather than being silently ignored.
+as its own top-level line (alongside `func`/`START`, not inside either). The path must be absolute -- a relative path is a hard error. The settings file must consent back, with `allow.link*("/absolute/path/to/name.cyborgpl")*` as its required first line (also absolute), naming the exact `.cyborgpl` file linking to it -- a mutual handshake, so neither file's say-so alone is enough. Any mismatch (missing file, wrong path on either side, a relative path, malformed `allow.link` line) is a hard error, refusing to compile. `linkto`'s argument is a literal string only for now, no variables. After the handshake, the rest of the settings file is `setting.value` per line; currently the only recognized setting is `optimize` (`true`/`false`, default `true`), disabling LLVM's optimizer entirely when set to `false` -- for an honest look at a program's real, unoptimized behavior/timing. See `examples/settings_demo.cyborgpl` / `examples/settings_demo.cyborgsettings`. An unrecognized setting name, or a value that isn't `true`/`false`, is a hard error rather than being silently ignored.
 
 ## Examples
 
