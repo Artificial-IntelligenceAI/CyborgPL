@@ -48,6 +48,9 @@ pub enum Token {
     Append,
     /// `length*(array)*` -- an array's element count, as a value.
     Length,
+    /// `read*(source)*;` -- reads a file's whole content and prints it
+    /// directly, with no variable declared in between.
+    Read,
     /// Marks the start of the program's entry point block (replaces `fn main`).
     Start,
     End,
@@ -123,6 +126,7 @@ impl Token {
             "from" => Some(Token::From),
             "append" => Some(Token::Append),
             "length" => Some(Token::Length),
+            "read" => Some(Token::Read),
             "not" => Some(Token::Not),
             "START" => Some(Token::Start),
             "END" => Some(Token::End),

@@ -11,4 +11,9 @@ overwrite*"42.5"* [to*("/tmp/cyborgpl_storage_read_number.txt")*];
 input:num 'n' [from*("/tmp/cyborgpl_storage_read_number.txt")*];
 print*"read number: " (ref:var:num 'n') " doubled: " (ref:var:num 'n') x (2)*;
 
+# `read*(source)*;` -- reads a file and prints its content directly,
+# with no variable declared in between.
+print*"read*(source)* output:"*;
+read*(ref:var:file 'x')*;
+
 END

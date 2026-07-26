@@ -286,6 +286,9 @@ impl TypeChecker {
                 self.check_print_segments(segments);
                 self.check_dest(dest);
             }
+            Stmt::Read(source) => {
+                self.check_file_clause(source, "read");
+            }
             Stmt::ExprStmt(expr) => match expr {
                 // A call as a bare statement discards its result (even a
                 // non-void one), matching Stmt::ExprStmt's codegen -- so

@@ -284,6 +284,11 @@ pub enum Stmt {
     /// building as `Print`, but `dest` is required: this only ever writes
     /// to a file (replacing its entire content), never the screen.
     Overwrite(Vec<PrintSegment>, Expr),
+    /// `read*(source)*;` -- reads `source` (a `str`/`file` path)'s whole
+    /// content and prints it directly, with no variable declared in
+    /// between. Shorthand for `input:str 'tmp' [from*(source)*]; print*(ref:var:str 'tmp')*;`
+    /// without actually needing the intermediate variable.
+    Read(Expr),
     ExprStmt(Expr),
     If(Expr, Block, Option<Block>),
     While(Expr, Block),

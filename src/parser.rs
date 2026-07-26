@@ -390,6 +390,17 @@ impl Parser {
                 self.expect(Token::Semicolon)?;
                 Ok(Stmt::Overwrite(segments, dest))
             }
+            // `read*(source)*;` -- same single-value bracketing as
+            // `length*(array)*`/`append`'s own arguments, no `[from*...*]`
+            // clause needed since there's nothing else for it to modify.
+            Token::Read => {
+                self.advance();
+                self.expect(Token::Star)?;
+                let source = self.parse_expr()?;
+                self.expect(Token::Star)?;
+                self.expect(Token::Semicolon)?;
+                Ok(Stmt::Read(source))
+            }
             // `append*(array), (value)*;` -- grows an array by one element.
             Token::Append => {
                 self.advance();

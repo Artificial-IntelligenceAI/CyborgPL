@@ -594,7 +594,9 @@ impl<'ctx> Codegen<'ctx> {
                     self.scan_expr_for_bignum_literals(val, out);
                 }
                 Stmt::Return(Some(e)) => self.scan_expr_for_bignum_literals(e, out),
-                Stmt::Return(None) | Stmt::Input(..) | Stmt::Clock(..) | Stmt::While(..) => {}
+                // `Read`'s source is always str/file, never bignum-shaped,
+                // so there's nothing here worth scanning for.
+                Stmt::Return(None) | Stmt::Input(..) | Stmt::Clock(..) | Stmt::While(..) | Stmt::Read(_) => {}
                 Stmt::Print(segments, dest) => {
                     for seg in segments {
                         if let PrintSegment::Expr(e) = seg {
@@ -1847,6 +1849,31 @@ impl<'ctx> Codegen<'ctx> {
                 for ptr in to_free {
                     self.builder.build_call(self.libc_free, &[ptr.into()], "bignum_fmt_free_call").unwrap();
                 }
+            }
+            // `read*(source)*;` -- reads source's whole content (the exact
+            // same `read_file_fn` call `input:str ... [from*(source)*]`
+            // already uses) and prints it directly via a fixed "%s\n"
+            // format string -- the content is always passed as printf's
+            // *argument*, never spliced into the format string itself, so
+            // a '%' actually present in the file's own content can't be
+            // misread as a format specifier. Frees the freshly read buffer
+            // right after printf consumes it -- nothing adopts it, unlike
+            // `input:str`'s version, which hands it to a named variable.
+            Stmt::Read(source) => {
+                let path = self.compile_expr(source)?.into_pointer_value();
+                let content = self
+                    .builder
+                    .build_call(self.read_file_fn, &[path.into()], "read_call")
+                    .unwrap()
+                    .try_as_basic_value()
+                    .basic()
+                    .unwrap()
+                    .into_pointer_value();
+                let fmt_global = self.builder.build_global_string_ptr("%s\n", "read_fmt").unwrap();
+                self.builder
+                    .build_call(self.printf_fn, &[fmt_global.as_pointer_value().into(), content.into()], "read_printf_call")
+                    .unwrap();
+                self.builder.build_call(self.libc_free, &[content.into()], "read_content_free_call").unwrap();
             }
             Stmt::ExprStmt(expr) => {
                 // Not compile_expr(expr): a call to a void function (the
