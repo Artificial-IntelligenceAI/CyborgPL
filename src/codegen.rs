@@ -430,13 +430,17 @@ impl<'ctx> Codegen<'ctx> {
             )
             .ok_or("failed to create target machine for this host")?;
 
-        // Every `var:` currently compiles to an alloca + store/load, even
-        // when the value never needs to live in memory at all -- mem2reg
-        // promotes those into plain SSA values wherever it's safe to,
-        // which is effectively always here (no address-of, no pointers
-        // exposed to source programs, nothing that could alias an alloca).
+        // The full standard -O2 pipeline (mem2reg/SROA, inlining, GVN,
+        // dead-code elimination, instcombine, loop optimizations, etc.) --
+        // LLVM's own well-tested optimizer, not anything hand-picked or
+        // CyborgPL-specific. Free in the sense that it costs nothing to
+        // write (one pipeline name, not a list of passes to choose and
+        // maintain) and applies uniformly to every compiled program,
+        // unlike this project's own targeted optimizations (bignum chain
+        // fusion, literal hoisting, etc.), which each only help the
+        // specific pattern they were built for.
         self.module
-            .run_passes("mem2reg", &target_machine, PassBuilderOptions::create())
+            .run_passes("default<O2>", &target_machine, PassBuilderOptions::create())
             .map_err(|e| e.to_string())?;
 
         target_machine

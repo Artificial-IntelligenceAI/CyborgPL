@@ -6,7 +6,7 @@ CyborgPL is a hobby programming language that compiles to native machine code vi
 
 ## What's implemented so far
 
-- A full pipeline: lexer → parser → AST → type check → LLVM codegen → `mem2reg` → native object file → linked binary (via [inkwell](https://github.com/TheDan64/inkwell)).
+- A full pipeline: lexer → parser → AST → type check → LLVM codegen → LLVM's standard `-O2` optimization pipeline (inlining, GVN, dead-code elimination, instcombine, loop optimizations, etc.) → native object file → linked binary (via [inkwell](https://github.com/TheDan64/inkwell)).
 - `var:type 'name' = value;` variable declarations, with `ref:var:type 'name'` for every read/write reference.
 - `START ... END` as the program's entry point; `func 'name'*'param': type, ...* -> type { ... }` for function definitions, called via `ref:func 'name'*arg, arg, ...*` (mirroring `print*...*`'s own bracketing of a list of things) — or its shorter alternative spelling, `>> 'name'*arg, arg, ...*`, both work everywhere a call can appear (a print segment, a bare statement, a var-decl value, a `length*...*`/`append*...*` argument, another call's argument, ...). Parameters and return types support `[precision:N]` and `bignum` — arguments are coerced to match, and a returned `bignum` is always an independent copy the caller owns.
 - `if`/`else`, `while`, and real lexical block scoping (a variable declared inside a block is gone once the block ends).
