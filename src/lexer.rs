@@ -126,12 +126,34 @@ impl<'a> Lexer<'a> {
     fn lex_number(&mut self, first: char) -> Token {
         let mut s = String::new();
         s.push(first);
-        while let Some(&c) = self.chars.peek() {
-            if c.is_ascii_digit() {
-                s.push(c);
-                self.chars.next();
-            } else {
-                break;
+        loop {
+            match self.chars.peek() {
+                Some(&c) if c.is_ascii_digit() => {
+                    s.push(c);
+                    self.chars.next();
+                }
+                // A comma is accepted purely as a digit-grouping separator
+                // (`1,000,000`) -- the same "readability aid, not enforced
+                // grouping" role Rust's `_` plays in a numeric literal.
+                // Stripped here, not kept, so every later stage (bignum's
+                // exact-text preservation, int's literal parsing) only
+                // ever sees plain digits, exactly as before this. Only
+                // consumed when a digit *immediately* follows the comma --
+                // a real argument-separating comma is always preceded by
+                // a closing `)` instead, since every value is individually
+                // parenthesized, so the two can never be confused; a bare
+                // trailing comma right after the last digit is left alone
+                // for the parser to handle as whatever it actually is.
+                Some(&',') => {
+                    let mut lookahead = self.chars.clone();
+                    lookahead.next();
+                    if matches!(lookahead.peek(), Some(d) if d.is_ascii_digit()) {
+                        self.chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                _ => break,
             }
         }
 
