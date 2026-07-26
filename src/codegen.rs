@@ -2229,32 +2229,36 @@ impl<'ctx> Codegen<'ctx> {
                         // allocation this removes is a smaller slice of the
                         // total, but still a real, verified win).
                         //
-                        // Deliberately excludes Pow: `xx` parses
-                        // *right*-associative (see parse_power in
+                        // `Pow` doesn't fit the left-only check above: `xx`
+                        // parses *right*-associative (see parse_power in
                         // parser.rs), so a real `a xx b xx c` chain builds as
                         // Binary(a, Pow, Binary(b, Pow, c)) -- the reusable
-                        // intermediate sits on the *right*, which this
-                        // left-operand-only check never looks at. Caught by
-                        // testing a genuine `xx` chain in the real compiler
-                        // after profiling (not just the standalone
-                        // microbenchmark, which had wrongly assumed the same
-                        // left-associative shape as the other four ops) --
-                        // it measured no improvement at all, confirming
-                        // Pow's inclusion would have been dead weight.
-                        // Extending this to also check the right operand
-                        // (and separately verifying GMP's aliasing guarantee
-                        // for dst-aliasing-the-*second*-operand, not just
-                        // the first) is possible but deliberately not done
-                        // here.
-                        let reused = matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div)
+                        // intermediate is the *exponent* (the right
+                        // operand), not the base. bignum_pow's own shim
+                        // fully reads and converts its exponent argument to
+                        // a plain integer *before* ever touching the
+                        // destination, so `bignum_pow(dst, base, exp)` with
+                        // `dst` aliasing `exp` is safe -- verified
+                        // independently (this is dst-aliases-*second*-
+                        // argument, a different case than the dst-aliases-
+                        // first-argument aliasing already relied on for
+                        // Add/Sub/Mul/Div above). Only checked when the left
+                        // check didn't already match, since a given op can
+                        // only reuse one side's handle as its destination.
+                        let reused_left = matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div)
                             .then(|| self.bignum_temps.iter().position(|(_, v, p)| *v == l && *p == result_precision))
                             .flatten();
-                        let dst = match reused {
-                            Some(idx) => {
-                                self.bignum_temps.remove(idx);
-                                lp
-                            }
-                            None => self.bignum_new(result_precision),
+                        let reused_right = (reused_left.is_none() && *op == BinOp::Pow)
+                            .then(|| self.bignum_temps.iter().position(|(_, v, p)| *v == r && *p == result_precision))
+                            .flatten();
+                        let dst = if let Some(idx) = reused_left {
+                            self.bignum_temps.remove(idx);
+                            lp
+                        } else if let Some(idx) = reused_right {
+                            self.bignum_temps.remove(idx);
+                            rp
+                        } else {
+                            self.bignum_new(result_precision)
                         };
                         self.builder.build_call(shim_fn, &[dst.into(), lp.into(), rp.into()], "bignum_op_call").unwrap();
                         // Nothing else ever adopts this handle -- whatever
@@ -2863,7 +2867,6 @@ impl<'ctx> Codegen<'ctx> {
     ) -> PointerValue<'ctx> {
         let function = self.current_function();
         let i64_ty = self.context.i64_type();
-        let bignum_ty = self.bignum_struct_type();
 
         let height_int = self
             .builder
@@ -2874,10 +2877,21 @@ impl<'ctx> Codegen<'ctx> {
             .unwrap()
             .into_int_value();
 
-        let initial = self.bignum_new(precision);
-        self.builder.build_call(self.bignum.copy, &[initial.into(), base.into()], "tet_bignum_init_copy").unwrap();
-        let result_slot = self.entry_alloca(bignum_ty.into(), "tet_bignum_result");
-        self.builder.build_store(result_slot, self.wrap_bignum_ptr(initial)).unwrap();
+        // One handle for the whole loop, mutated in place every iteration
+        // -- used to be a fresh `bignum_new` per iteration, immediately
+        // freeing the previous one, even though bignum_pow's destination
+        // may safely alias its own exponent argument (it fully reads and
+        // converts the exponent to a plain integer before ever touching
+        // the destination, so `bignum_pow(acc, base, acc)` is safe -- the
+        // same aliasing GMP already documents for the direct-source case,
+        // verified independently here since this is dst-aliases-*second*-
+        // argument rather than dst-aliases-first). `acc` itself (the
+        // pointer) never changes across iterations -- only the value it
+        // points to does -- so it needs no alloca/store/load slot at all,
+        // unlike the loop counter: it's a single SSA value defined before
+        // the loop and used identically in every block that follows.
+        let acc = self.bignum_new(precision);
+        self.builder.build_call(self.bignum.copy, &[acc.into(), base.into()], "tet_bignum_init_copy").unwrap();
         let counter_slot = self.entry_alloca(i64_ty.into(), "tet_bignum_i");
         self.builder.build_store(counter_slot, i64_ty.const_int(2, true)).unwrap();
 
@@ -2895,19 +2909,13 @@ impl<'ctx> Codegen<'ctx> {
         self.builder.build_conditional_branch(keep_going, body_bb, end_bb).unwrap();
 
         self.builder.position_at_end(body_bb);
-        let current_wrapped = self.builder.build_load(bignum_ty, result_slot, "tet_bignum_result_load").unwrap();
-        let current_ptr = self.unwrap_bignum_ptr(current_wrapped);
-        let next = self.bignum_new(precision);
-        self.builder.build_call(self.bignum.pow, &[next.into(), base.into(), current_ptr.into()], "tet_bignum_pow").unwrap();
-        self.free_bignum_ptr(current_ptr);
-        self.builder.build_store(result_slot, self.wrap_bignum_ptr(next)).unwrap();
+        self.builder.build_call(self.bignum.pow, &[acc.into(), base.into(), acc.into()], "tet_bignum_pow").unwrap();
         let counter_next = self.builder.build_int_add(counter, i64_ty.const_int(1, true), "tet_bignum_i_next").unwrap();
         self.builder.build_store(counter_slot, counter_next).unwrap();
         self.builder.build_unconditional_branch(cond_bb).unwrap();
 
         self.builder.position_at_end(end_bb);
-        let final_wrapped = self.builder.build_load(bignum_ty, result_slot, "tet_bignum_final").unwrap();
-        self.unwrap_bignum_ptr(final_wrapped)
+        acc
     }
 
     /// Postfix `!` on `num`/`numw`: `n` is only known at runtime, so this is

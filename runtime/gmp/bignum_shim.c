@@ -70,10 +70,16 @@ void bignum_pow(void *dst, void *base, void *exp) {
     mpf_abs(abs_e, e);
     unsigned long exp_ui = mpf_get_ui(abs_e);
     mpf_clear(abs_e);
+    // Captured before mpf_pow_ui runs: dst may alias exp (codegen reuses
+    // a chained xx expression's own exponent handle as its destination),
+    // in which case `e` -- a pointer into the same memory as exp, not a
+    // copy -- would otherwise reflect the just-computed *result* by the
+    // time it's read below, not the original exponent's sign.
+    int exp_sign = mpf_sgn(e);
 
     mpf_pow_ui(*(mpf_t *)dst, *(mpf_t *)base, exp_ui);
 
-    if (mpf_sgn(e) < 0) {
+    if (exp_sign < 0) {
         mpf_t one;
         mpf_init2(one, mpf_get_prec(*(mpf_t *)dst));
         mpf_set_ui(one, 1);
