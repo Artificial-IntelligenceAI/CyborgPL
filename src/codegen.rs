@@ -708,13 +708,18 @@ impl<'ctx> Codegen<'ctx> {
     }
 
     /// If a value being stored/passed doesn't match the target num
-    /// precision, converts it. No-op for bool. A `str` being stored
-    /// anywhere (variable, return, call argument) always gets its own
-    /// fresh `strdup`'d copy -- same "always an independent copy on store"
-    /// rule `bignum` already follows -- so a `str` variable's buffer can
-    /// always be freed unconditionally at scope exit without having to
-    /// track whether it started out as a literal (never to be freed) or a
-    /// `stch` result (already heap-owned).
+    /// precision, converts it. No-op for bool. A `str` reaching *this*
+    /// function always gets its own fresh `strdup`'d copy -- same "always
+    /// an independent copy on store" rule `bignum` already follows -- so a
+    /// `str` variable's buffer can always be freed unconditionally at
+    /// scope exit without having to track whether it started out as a
+    /// literal (never to be freed) or a `stch` result (already
+    /// heap-owned). `compile_and_coerce` -- the only caller -- skips this
+    /// entirely and adopts the handle directly whenever it's already a
+    /// not-yet-consumed `str_temps` entry, the same "nothing else
+    /// references it" shortcut `bignum` already gets; a plain literal or
+    /// variable read never is one, so this copy path is exactly the
+    /// remaining case that genuinely still needs it.
     fn coerce_to_type(&self, value: BasicValueEnum<'ctx>, ty: Type) -> BasicValueEnum<'ctx> {
         match (value, ty) {
             (BasicValueEnum::FloatValue(f), Type::Num(width)) => self.coerce_float(f, width).into(),
@@ -891,6 +896,26 @@ impl<'ctx> Codegen<'ctx> {
             if let Some(idx) = self.bignum_temps.iter().position(|(_, v, p)| *v == value && *p == target_precision) {
                 self.bignum_temps.remove(idx);
                 return Ok(value);
+            }
+        }
+
+        // Same reasoning as bignum's adoption check above, simpler here
+        // since a `str`/`file` value has no precision to match -- just the
+        // raw pointer. If `value` is itself a not-yet-consumed `str_temps`
+        // entry (a `stch` result or a str-returning call) -- nothing else
+        // holds a reference to it -- adopt it directly instead of running
+        // a redundant `strdup` just to duplicate a buffer that's about to
+        // be thrown away anyway. A plain string literal's rodata pointer
+        // and a variable's own already-owned buffer are never pushed to
+        // `str_temps`, so this can never wrongly adopt something that
+        // still genuinely needs its own copy (a literal) or that another
+        // variable still owns (a plain read).
+        if matches!(ty, Type::Str | Type::File) {
+            if let BasicValueEnum::PointerValue(p) = value {
+                if let Some(idx) = self.str_temps.iter().position(|&v| v == p) {
+                    self.str_temps.remove(idx);
+                    return Ok(value);
+                }
             }
         }
 
@@ -1489,7 +1514,7 @@ impl<'ctx> Codegen<'ctx> {
                 }
 
                 let llvm_ty = self.basic_type(*ty);
-                let alloca = self.builder.build_alloca(llvm_ty, name).unwrap();
+                let alloca = self.entry_alloca(llvm_ty, name);
                 self.builder.build_store(alloca, value).unwrap();
                 self.declare_scoped(key.clone());
                 self.variables.insert(key, (alloca, llvm_ty));
@@ -1566,7 +1591,7 @@ impl<'ctx> Codegen<'ctx> {
                 };
 
                 let llvm_ty = self.basic_type(*ty);
-                let alloca = self.builder.build_alloca(llvm_ty, name).unwrap();
+                let alloca = self.entry_alloca(llvm_ty, name);
                 self.builder.build_store(alloca, value).unwrap();
                 self.declare_scoped(key.clone());
                 self.variables.insert(key, (alloca, llvm_ty));
@@ -1602,7 +1627,7 @@ impl<'ctx> Codegen<'ctx> {
                 };
 
                 let llvm_ty = self.basic_type(*ty);
-                let alloca = self.builder.build_alloca(llvm_ty, name).unwrap();
+                let alloca = self.entry_alloca(llvm_ty, name);
                 self.builder.build_store(alloca, value).unwrap();
                 self.declare_scoped(key.clone());
                 self.variables.insert(key, (alloca, llvm_ty));
