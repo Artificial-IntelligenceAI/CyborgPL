@@ -50,11 +50,7 @@ Running with no file argument compiles a small built-in demo instead:
 cargo run
 ```
 
-Pass `-O0` (anywhere among the arguments) to disable LLVM's optimizer entirely, for an honest look at a program's real, unoptimized behavior/timing:
-
-```bash
-cargo run -- examples/hello.cyborgpl -O0
-```
+A `name.cyborgpl` file's settings live in a sibling `name.cyborgsettings` file in the same directory, discovered automatically -- not a CLI flag, so a program's settings travel with the file itself rather than however it happens to be invoked. Each line is `setting.value`; currently the only recognized setting is `optimize` (`true`/`false`, default `true`), disabling LLVM's optimizer entirely when set to `false` -- for an honest look at a program's real, unoptimized behavior/timing. See `examples/settings_demo.cyborgsettings`. An unrecognized setting name, or a value that isn't `true`/`false`, is a hard error rather than being silently ignored.
 
 ## Examples
 

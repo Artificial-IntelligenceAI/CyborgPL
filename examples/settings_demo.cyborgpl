@@ -1,0 +1,14 @@
+START
+
+clock:num 'start';
+var:int 'i' = (0);
+var:int 'total' = (0);
+while (ref:var:int 'i') < (1000000) {
+    ref:var:int 'total' = (ref:var:int 'i') x (2);
+    ref:var:int 'i' = (ref:var:int 'i') + (1);
+}
+clock:num 'end';
+print*"elapsed = " (ref:var:num 'end') - (ref:var:num 'start') " seconds"*;
+print*"total = " (ref:var:int 'total')*;
+
+END

@@ -41,13 +41,64 @@ const DEFAULT_SOURCE: &str = r#"
     END
 "#;
 
+/// A `name.cyborgpl` file's settings live in a sibling `name.cyborgsettings`
+/// file in the same directory -- not a CLI flag, so a program's settings
+/// travel with it as its own file rather than however it happens to be
+/// invoked. Each line is `setting.value` (e.g. `optimize.false`); blank
+/// lines are skipped. Missing file entirely means every default applies
+/// (currently just `optimize`, defaulting to `true`). An unrecognized
+/// setting name or a value that isn't `true`/`false` is a hard error --
+/// the same "loud failure over silently wrong behavior" precedent every
+/// other part of this compiler already follows (a crash on a typo, not a
+/// silently-ignored setting), which matters especially here since a
+/// silently-ignored optimize setting would look identical to it working.
+fn read_optimize_setting(source_path: &str) -> bool {
+    let settings_path = Path::new(source_path).with_extension("cyborgsettings");
+    let Ok(contents) = std::fs::read_to_string(&settings_path) else {
+        return true;
+    };
+
+    let mut optimize = true;
+    for (i, line) in contents.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((name, value)) = line.split_once('.') else {
+            eprintln!(
+                "{}: line {}: expected 'setting.value', found {line:?}",
+                settings_path.display(),
+                i + 1
+            );
+            std::process::exit(1);
+        };
+        match name {
+            "optimize" => {
+                optimize = match value {
+                    "true" => true,
+                    "false" => false,
+                    other => {
+                        eprintln!(
+                            "{}: line {}: 'optimize' must be true or false, found {other:?}",
+                            settings_path.display(),
+                            i + 1
+                        );
+                        std::process::exit(1);
+                    }
+                };
+            }
+            other => {
+                eprintln!("{}: line {}: unrecognized setting '{other}'", settings_path.display(), i + 1);
+                std::process::exit(1);
+            }
+        }
+    }
+    optimize
+}
+
 fn main() {
-    // `-O0` disables LLVM's optimizer entirely (see write_object_file) --
-    // recognized anywhere among the arguments, order-independent with the
-    // source file path, matching how every other compiler's flags work.
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let optimize = !args.iter().any(|a| a == "-O0");
-    let path = args.iter().find(|a| a.as_str() != "-O0").cloned();
+    let path = std::env::args().nth(1);
+    let optimize = path.as_deref().map_or(true, read_optimize_setting);
     let source = match &path {
         Some(path) => std::fs::read_to_string(path).unwrap_or_else(|e| {
             eprintln!("failed to read {path}: {e}");
