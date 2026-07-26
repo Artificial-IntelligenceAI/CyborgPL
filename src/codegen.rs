@@ -70,6 +70,18 @@ pub struct Codegen<'ctx> {
     /// it back, the same way a variable's declared type coerces whatever
     /// is stored into it.
     current_return_type: Type,
+    /// Whether `Stmt::Return` is currently being compiled inside
+    /// `START...END` itself, rather than a real user function. `main`'s
+    /// actual LLVM return type is always `i32` (the C runtime's own
+    /// calling convention), regardless of `current_return_type` being
+    /// `Type::Void` here (there's no source-level return type for the
+    /// entry point to track) -- so a bare `return;` written inside
+    /// `START...END` needs to build `ret i32 0`, matching the
+    /// fall-off-the-end case `compile_entry` already handles, not a real
+    /// `ret void` (which would leave `main`'s return-value register
+    /// unset -- an undefined, garbage process exit code, not the
+    /// process crashing or misbehaving otherwise).
+    in_entry: bool,
     /// Keyed by (name, type) rather than just name, so a name can be shared
     /// by variables of different types -- ref:var:TYPE 'name' picks between
     /// them by type at each reference site.
@@ -359,6 +371,7 @@ impl<'ctx> Codegen<'ctx> {
             functions: HashMap::new(),
             function_sigs: HashMap::new(),
             current_return_type: Type::Void,
+            in_entry: false,
             variables: HashMap::new(),
             scopes: Vec::new(),
             bignum_temps: Vec::new(),
@@ -1387,6 +1400,7 @@ impl<'ctx> Codegen<'ctx> {
         self.variables.clear();
         self.scopes.clear();
         self.current_return_type = Type::Void;
+        self.in_entry = true;
 
         self.compile_block(entry)?;
 
@@ -1405,6 +1419,7 @@ impl<'ctx> Codegen<'ctx> {
         self.variables.clear();
         self.scopes.clear();
         self.current_return_type = f.return_type;
+        self.in_entry = false;
         // Wraps params + the whole body in one scope, so a bignum
         // parameter gets freed exactly like any other bignum local --
         // whether via an explicit `return` (whose own scope-walk already
@@ -1777,6 +1792,21 @@ impl<'ctx> Codegen<'ctx> {
                 match coerced {
                     Some(value) => {
                         self.builder.build_return(Some(&value)).unwrap();
+                    }
+                    // A bare `return;` inside `START...END` still has to
+                    // satisfy `main`'s real LLVM signature (`i32`, the C
+                    // runtime's own convention) even though there's no
+                    // source-level return type to coerce against here --
+                    // `ret void` there would leave main's return-value
+                    // register unset, an undefined process exit code
+                    // rather than the intended "ran fine" 0. Matches the
+                    // same `ret i32 0` the fall-off-the-end case already
+                    // builds in `compile_entry`. A real void-returning
+                    // user function still gets a genuine `ret void` here,
+                    // unaffected.
+                    None if self.in_entry => {
+                        let zero = self.context.i32_type().const_int(0, false);
+                        self.builder.build_return(Some(&zero)).unwrap();
                     }
                     None => {
                         self.builder.build_return(None).unwrap();
