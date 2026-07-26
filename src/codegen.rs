@@ -2203,26 +2203,50 @@ impl<'ctx> Codegen<'ctx> {
                             .unwrap_or(DEFAULT_BIGNUM_PRECISION)
                             .max(self.bignum_precision_of_expr(rhs).unwrap_or(DEFAULT_BIGNUM_PRECISION));
 
-                        // `+`/`-` chains (`a + b + c + d`, compiled bottom-up
-                        // as nested Binary nodes) used to allocate a fresh
-                        // handle for *every* intermediate step, even though
-                        // each one is immediately superseded by the very
-                        // next step and never read again. GMP documents that
-                        // mpf_add/mpf_sub's destination may alias either
-                        // source operand, so whenever `l` is itself a
+                        // A chain of the same left-associative op (`a + b +
+                        // c + d`, `a x b x c x d`, ..., compiled bottom-up as
+                        // nested Binary nodes with the running result always
+                        // on the *left*) used to allocate a fresh handle for
+                        // *every* intermediate step, even though each one is
+                        // immediately superseded by the very next step and
+                        // never read again. GMP documents that
+                        // mpf_add/mpf_sub/mpf_mul/mpf_div's destination may
+                        // alias a source operand, so whenever `l` is itself a
                         // not-yet-consumed bignum_temps entry (nothing else
                         // references it -- the same check compile_and_coerce
                         // already uses to adopt a temp directly instead of
                         // copying) at exactly this op's own result
                         // precision, accumulate straight into it instead of
-                        // allocating a new destination. Profiled at ~1.8x
-                        // (a single extra term) to ~2.8x (a 4-op chain) on a
-                        // tight loop before implementing this. Only Add/Sub
-                        // -- Mul/Div/Pow chains aren't nearly as common in
-                        // practice and haven't been profiled, so they're
-                        // left as a possible future extension rather than
-                        // assumed to behave the same way.
-                        let reused = matches!(op, BinOp::Add | BinOp::Sub)
+                        // allocating a new destination. Profiled before
+                        // implementing, standalone against the real GMP
+                        // calls, then confirmed matching in the real
+                        // compiler: Add/Sub ~1.8x (one extra term) to ~2.8x
+                        // (a 4-op chain); Mul similar (~2.2-2.6x on a 4-op
+                        // chain, since multiply is cheap enough that
+                        // allocation overhead dominates the same way
+                        // addition's does); Div ~1.45x (division is
+                        // expensive enough in its own right that the
+                        // allocation this removes is a smaller slice of the
+                        // total, but still a real, verified win).
+                        //
+                        // Deliberately excludes Pow: `xx` parses
+                        // *right*-associative (see parse_power in
+                        // parser.rs), so a real `a xx b xx c` chain builds as
+                        // Binary(a, Pow, Binary(b, Pow, c)) -- the reusable
+                        // intermediate sits on the *right*, which this
+                        // left-operand-only check never looks at. Caught by
+                        // testing a genuine `xx` chain in the real compiler
+                        // after profiling (not just the standalone
+                        // microbenchmark, which had wrongly assumed the same
+                        // left-associative shape as the other four ops) --
+                        // it measured no improvement at all, confirming
+                        // Pow's inclusion would have been dead weight.
+                        // Extending this to also check the right operand
+                        // (and separately verifying GMP's aliasing guarantee
+                        // for dst-aliasing-the-*second*-operand, not just
+                        // the first) is possible but deliberately not done
+                        // here.
+                        let reused = matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div)
                             .then(|| self.bignum_temps.iter().position(|(_, v, p)| *v == l && *p == result_precision))
                             .flatten();
                         let dst = match reused {
