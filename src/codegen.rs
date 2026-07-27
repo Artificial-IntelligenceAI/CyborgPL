@@ -34,6 +34,34 @@ struct BignumFns<'ctx> {
     cmp: FunctionValue<'ctx>,
 }
 
+/// The GMP shim functions (runtime/gmp/bigint_shim.c) backing `bigint`.
+/// No `precision`/width parameter anywhere here -- unlike `BignumFns`,
+/// which needs one for `new`, `bigint` is unbounded.
+struct BigIntFns<'ctx> {
+    new: FunctionValue<'ctx>,
+    set_str: FunctionValue<'ctx>,
+    copy: FunctionValue<'ctx>,
+    add: FunctionValue<'ctx>,
+    sub: FunctionValue<'ctx>,
+    mul: FunctionValue<'ctx>,
+    div: FunctionValue<'ctx>,
+    to_string: FunctionValue<'ctx>,
+    free: FunctionValue<'ctx>,
+    pow: FunctionValue<'ctx>,
+    /// `a xxx b`, computed entirely inside the shim (unlike bignum's own
+    /// tetration, which builds the loop as LLVM IR) -- see
+    /// runtime/gmp/bigint_shim.c for why. Takes the height directly as a
+    /// native `i64`, not another bigint handle.
+    tetration: FunctionValue<'ctx>,
+    /// Postfix `!`, likewise computed entirely inside the shim via GMP's
+    /// own `mpz_fac_ui` rather than a hand-rolled loop.
+    factorial: FunctionValue<'ctx>,
+    neg: FunctionValue<'ctx>,
+    /// mpz_cmp's own convention (negative/zero/positive) -- codegen just
+    /// compares this against 0 with whichever predicate the source asked for.
+    cmp: FunctionValue<'ctx>,
+}
+
 /// One entry per variable declared directly in a block, remembering
 /// whatever needs to happen to `Codegen::variables` when that block ends:
 /// either the key simply disappears (nothing of that name existed before
@@ -197,6 +225,18 @@ pub struct Codegen<'ctx> {
     ssub_overflow_fn: FunctionValue<'ctx>,
     smul_overflow_fn: FunctionValue<'ctx>,
     bignum: BignumFns<'ctx>,
+    bigint: BigIntFns<'ctx>,
+    /// The distinct named `{ptr}` struct type every `bigint` value is
+    /// wrapped in -- see its own construction site in `new` for why this
+    /// has to be a separate, named type rather than reusing
+    /// `bignum_struct_type()`'s anonymous one.
+    bigint_struct_ty: StructType<'ctx>,
+    /// Same role as `bignum_temps`, for `bigint` -- intermediate handles
+    /// (binary/unary op results, a bigint-returning call) not yet
+    /// adopted by a variable/return, freed once the statement that
+    /// produced them is done with them. Simpler than `bignum_temps`:
+    /// no precision to track alongside each entry.
+    bigint_temps: Vec<(PointerValue<'ctx>, BasicValueEnum<'ctx>)>,
 }
 
 impl<'ctx> Codegen<'ctx> {
@@ -364,6 +404,92 @@ impl<'ctx> Codegen<'ctx> {
             ),
         };
 
+        // runtime/gmp/bigint_shim.c -- same opaque-i8_ptr-handle
+        // convention as bignum above, but `new` takes no precision
+        // argument at all (bigint is unbounded).
+        let bigint = BigIntFns {
+            new: module.add_function("bigint_new", i8_ptr.fn_type(&[], false), Some(Linkage::External)),
+            set_str: module.add_function(
+                "bigint_set_str",
+                void_ty.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            ),
+            copy: module.add_function(
+                "bigint_copy",
+                void_ty.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            ),
+            add: module.add_function(
+                "bigint_add",
+                void_ty.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            ),
+            sub: module.add_function(
+                "bigint_sub",
+                void_ty.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            ),
+            mul: module.add_function(
+                "bigint_mul",
+                void_ty.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            ),
+            div: module.add_function(
+                "bigint_div",
+                void_ty.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            ),
+            to_string: module.add_function(
+                "bigint_to_string",
+                i8_ptr.fn_type(&[i8_ptr.into()], false),
+                Some(Linkage::External),
+            ),
+            free: module.add_function(
+                "bigint_free",
+                void_ty.fn_type(&[i8_ptr.into()], false),
+                Some(Linkage::External),
+            ),
+            pow: module.add_function(
+                "bigint_pow",
+                void_ty.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            ),
+            tetration: module.add_function(
+                "bigint_tetration",
+                void_ty.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            ),
+            factorial: module.add_function(
+                "bigint_factorial",
+                void_ty.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            ),
+            neg: module.add_function(
+                "bigint_neg",
+                void_ty.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            ),
+            cmp: module.add_function(
+                "bigint_cmp",
+                context.i32_type().fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            ),
+        };
+
+        // A distinct (named, not anonymous) single-field `{ptr}` struct
+        // type for `bigint` -- structurally identical to bignum/array's
+        // shared anonymous `{ptr}` wrapper, but a genuinely *different*
+        // LLVM type. Needed because LLVM structurally unifies anonymous
+        // struct types (two separately-built anonymous `{ptr}` structs
+        // are literally the same type), so a second anonymous wrapper
+        // could never be told apart from bignum's own at a site that
+        // dispatches on value *shape* alone (`value_fmt`, in particular)
+        // with no accompanying static type available. Built once, here,
+        // and reused (never reconstructed) so every value built/compared
+        // anywhere in codegen actually shares the same type.
+        let bigint_struct_ty = context.opaque_struct_type("bigint_handle");
+        bigint_struct_ty.set_body(&[i8_ptr.into()], false);
+
         Codegen {
             context,
             module,
@@ -402,6 +528,9 @@ impl<'ctx> Codegen<'ctx> {
             ssub_overflow_fn,
             smul_overflow_fn,
             bignum,
+            bigint,
+            bigint_struct_ty,
+            bigint_temps: Vec::new(),
         }
     }
 
@@ -466,6 +595,10 @@ impl<'ctx> Codegen<'ctx> {
             // thing keeping the two from ever being confused, same as it
             // already keeps `bignum` and `str` (a bare pointer) apart.
             Type::BigNum(_) | Type::Array(_) => self.bignum_struct_type().into(),
+            // A genuinely different wrapped-pointer struct type than
+            // bignum/array's -- see bigint_struct_ty's own construction
+            // site (in `new`) for why it can't just reuse theirs.
+            Type::BigInt => self.bigint_struct_ty.into(),
             Type::Void => panic!("void has no runtime representation"),
         }
     }
@@ -536,6 +669,65 @@ impl<'ctx> Codegen<'ctx> {
         self.wrap_bignum_ptr(handle)
     }
 
+    /// Same wrapping trick as `wrap_bignum_ptr`, but using `bigint`'s own
+    /// distinct struct type -- see `bigint_struct_ty`'s construction site
+    /// for why the two can't share one.
+    fn wrap_bigint_ptr(&self, ptr: PointerValue<'ctx>) -> BasicValueEnum<'ctx> {
+        let undef = self.bigint_struct_ty.get_undef();
+        self.builder.build_insert_value(undef, ptr, 0, "bigint_wrap").unwrap().into_struct_value().into()
+    }
+
+    fn unwrap_bigint_ptr(&self, value: BasicValueEnum<'ctx>) -> PointerValue<'ctx> {
+        self.builder
+            .build_extract_value(value.into_struct_value(), 0, "bigint_ptr")
+            .unwrap()
+            .into_pointer_value()
+    }
+
+    /// Calls bigint_new() and returns the resulting handle pointer (not
+    /// yet wrapped) -- no precision argument, unlike `bignum_new`.
+    fn bigint_new(&self) -> PointerValue<'ctx> {
+        self.builder
+            .build_call(self.bigint.new, &[], "bigint_new_call")
+            .unwrap()
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_pointer_value()
+    }
+
+    /// Converts an already-compiled value into a *freshly allocated*
+    /// bigint -- always a fresh handle and a copy, mirroring
+    /// `coerce_to_bignum` (bigint is heap-backed but has to behave *by
+    /// value* at the language level, same as every other type here).
+    /// Only ever reached with a `PointerValue` (a literal's raw text) or
+    /// a `StructValue` (another bigint) -- `bigint` is isolated, so
+    /// nothing else can reach this.
+    fn coerce_to_bigint(&self, value: BasicValueEnum<'ctx>) -> BasicValueEnum<'ctx> {
+        let handle = self.bigint_new();
+        match value {
+            BasicValueEnum::PointerValue(p) => {
+                self.builder.build_call(self.bigint.set_str, &[handle.into(), p.into()], "bigint_set_str_call").unwrap();
+            }
+            BasicValueEnum::StructValue(_) => {
+                let src = self.unwrap_bigint_ptr(value);
+                self.builder.build_call(self.bigint.copy, &[handle.into(), src.into()], "bigint_copy_call").unwrap();
+            }
+            other => panic!("cannot use {other:?} as a bigint value"),
+        }
+        self.wrap_bigint_ptr(handle)
+    }
+
+    /// Whether `value` is specifically a `bigint` (as opposed to a
+    /// `bignum`/`array`, which share the *shape* `StructValue` but not
+    /// the exact LLVM type) -- the one place this distinction has to be
+    /// made from a bare runtime value alone, with no accompanying static
+    /// `Expr`/`Type` to consult (`value_fmt`, called deep inside
+    /// print/`stch` compiling).
+    fn is_bigint_value(&self, value: BasicValueEnum<'ctx>) -> bool {
+        matches!(value, BasicValueEnum::StructValue(sv) if sv.get_type() == self.bigint_struct_ty)
+    }
+
     /// Determines what precision an expression, already known (or about
     /// to be used) as a `bignum`, actually gets constructed at -- purely
     /// via static AST inspection, mirroring typecheck.rs's own precision
@@ -572,6 +764,31 @@ impl<'ctx> Codegen<'ctx> {
                 }
             }
             _ => None,
+        }
+    }
+
+    /// Whether `expr` statically resolves to `bigint` -- mirrors
+    /// `bignum_precision_of_expr`'s structure exactly, just a bool
+    /// instead of a precision (there's nothing to widen to). Needed
+    /// because `bigint` reuses the *shape* `StructValue` that
+    /// `bignum`/`array` already use at the LLVM level (see
+    /// `bigint_struct_ty`), so `compile_expr`'s `Expr::Binary`/`Unary`
+    /// arms can't tell a `bigint` operand apart from a `bignum` one by
+    /// runtime shape alone -- this has to be decided from the AST,
+    /// before either side is even compiled, the same way `int`'s
+    /// literal-pairing already has to be resolved structurally rather
+    /// than from a compiled value's shape (which would just be `f64`
+    /// either way).
+    fn expr_is_bigint(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Var(_, Type::BigInt) => true,
+            Expr::ArrayIndex(_, Type::Array(ElementType::BigInt), _) => true,
+            Expr::Call(name, _) => matches!(self.function_sigs.get(name), Some((_, Type::BigInt))),
+            Expr::Unary(UnOp::Neg | UnOp::Factorial, inner) => self.expr_is_bigint(inner),
+            Expr::Binary(lhs, op, rhs) if *op != BinOp::Concat => {
+                self.expr_is_bigint(lhs) || self.expr_is_bigint(rhs)
+            }
+            _ => false,
         }
     }
 
@@ -749,6 +966,7 @@ impl<'ctx> Codegen<'ctx> {
             (BasicValueEnum::FloatValue(f), Type::NumW(width)) => self.coerce_float(f, width).into(),
             (BasicValueEnum::IntValue(iv), Type::Int(width)) => self.coerce_int_width(iv, width).into(),
             (_, Type::BigNum(precision)) => self.coerce_to_bignum(value, precision),
+            (_, Type::BigInt) => self.coerce_to_bigint(value),
             (BasicValueEnum::PointerValue(p), Type::Str | Type::File) => self
                 .builder
                 .build_call(self.strdup_fn, &[p.into()], "str_own_call")
@@ -832,6 +1050,142 @@ impl<'ctx> Codegen<'ctx> {
         }
     }
 
+    /// Same role as `compile_int_expr`, for `bigint` -- used by
+    /// `compile_and_coerce`'s propagation of a known `bigint` target into
+    /// a `Binary`/`Unary` expression's own operands, and by
+    /// `compile_expr`'s own `Expr::Binary`/`Unary` arms once they've
+    /// detected (via `expr_is_bigint`) that this is a `bigint`
+    /// expression -- `bigint` reuses the same `StructValue` *shape*
+    /// `bignum`/`array` already use at the LLVM level, so unlike `int`
+    /// (whose `IntValue` shape alone already tells it apart from
+    /// `bool`/`float`), this can't be discovered from a compiled value's
+    /// shape -- the whole subtree has to be compiled through here once
+    /// the AST-level check has confirmed it. Returns the raw (unwrapped)
+    /// handle; every intermediate handle constructed along the way is
+    /// registered in `bigint_temps` for the enclosing statement to free,
+    /// exactly like `compile_expr`'s own bignum dispatch does.
+    fn compile_bigint_expr(&mut self, expr: &Expr) -> Result<PointerValue<'ctx>, String> {
+        match expr {
+            Expr::Num(_, text) => {
+                let handle = self.bigint_new();
+                let text_ptr = self.builder.build_global_string_ptr(text, "bigint_lit").unwrap().as_pointer_value();
+                self.builder.build_call(self.bigint.set_str, &[handle.into(), text_ptr.into()], "bigint_set_str_call").unwrap();
+                self.bigint_temps.push((handle, self.wrap_bigint_ptr(handle)));
+                Ok(handle)
+            }
+            Expr::Binary(lhs, op, rhs) if *op != BinOp::Concat => {
+                let l = self.compile_bigint_expr(lhs)?;
+                let r = self.compile_bigint_expr(rhs)?;
+                // Only ever reached for an arithmetic op here -- a
+                // comparison can't validly appear nested inside a
+                // bigint-targeted expression (its result is `bool`, not
+                // `bigint`), the type checker already guarantees that.
+                // Uses `compile_bigint_arith` directly (the raw handle),
+                // not `compile_bigint_binary` -- wrapping the result into
+                // a struct only to immediately unwrap it again would
+                // create a *second*, different `extractvalue` instruction
+                // than the one already pushed into `bigint_temps`
+                // (`build_extract_value` mints a fresh instruction every
+                // call, even reading the same field of the same struct
+                // twice), silently breaking the identity check
+                // `compile_and_coerce`'s adoption logic relies on to know
+                // which handle it's actually holding.
+                Ok(self.compile_bigint_arith(*op, l, r))
+            }
+            Expr::Unary(op, inner) => {
+                let iv = self.compile_bigint_expr(inner)?;
+                let dst = self.bigint_new();
+                match op {
+                    UnOp::Neg => {
+                        self.builder.build_call(self.bigint.neg, &[dst.into(), iv.into()], "bigint_neg_call").unwrap();
+                    }
+                    UnOp::Factorial => {
+                        self.builder
+                            .build_call(self.bigint.factorial, &[dst.into(), iv.into()], "bigint_factorial_call")
+                            .unwrap();
+                    }
+                    UnOp::Not => panic!("Not on bigint should have been rejected by the type checker"),
+                }
+                self.bigint_temps.push((dst, self.wrap_bigint_ptr(dst)));
+                Ok(dst)
+            }
+            other => {
+                let value = self.compile_expr(other)?;
+                Ok(self.unwrap_bigint_ptr(value))
+            }
+        }
+    }
+
+    /// bigint's binary-op entry point -- shared by `compile_expr`'s own
+    /// `Expr::Binary` handling (any bigint-involving expression at all,
+    /// arithmetic or comparison) and `compile_bigint_expr`'s recursive
+    /// arithmetic-only case. `l`/`r` are raw (unwrapped) handles.
+    /// Deliberately simple for this first version -- unlike bignum,
+    /// there's no chain-fusion/destination-reuse optimization here yet;
+    /// every arithmetic op allocates a fresh destination handle.
+    fn compile_bigint_binary(&mut self, op: BinOp, l: PointerValue<'ctx>, r: PointerValue<'ctx>) -> BasicValueEnum<'ctx> {
+        match op {
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
+                let cmp = self
+                    .builder
+                    .build_call(self.bigint.cmp, &[l.into(), r.into()], "bigint_cmp_call")
+                    .unwrap()
+                    .try_as_basic_value()
+                    .basic()
+                    .unwrap()
+                    .into_int_value();
+                let zero = self.context.i32_type().const_int(0, true);
+                let predicate = match op {
+                    BinOp::Eq => IntPredicate::EQ,
+                    BinOp::Ne => IntPredicate::NE,
+                    BinOp::Lt => IntPredicate::SLT,
+                    BinOp::Gt => IntPredicate::SGT,
+                    BinOp::Le => IntPredicate::SLE,
+                    BinOp::Ge => IntPredicate::SGE,
+                    _ => unreachable!(),
+                };
+                self.builder.build_int_compare(predicate, cmp, zero, "bigint_cmp").unwrap().into()
+            }
+            BinOp::And | BinOp::Or => panic!("{op:?} requires bool operands, not bigint"),
+            BinOp::Concat => unreachable!("Concat is handled earlier, before this is ever called"),
+            _ => {
+                let dst = self.compile_bigint_arith(op, l, r);
+                self.wrap_bigint_ptr(dst)
+            }
+        }
+    }
+
+    /// The arithmetic-only half of `compile_bigint_binary` (`+ - x / xx
+    /// xxx`), returning the *raw* handle rather than the wrapped struct
+    /// -- shared with `compile_bigint_expr`'s recursive case, which needs
+    /// the raw pointer directly (see its own call site for why going
+    /// through the wrapped form there is actively wrong, not just
+    /// redundant).
+    fn compile_bigint_arith(&mut self, op: BinOp, l: PointerValue<'ctx>, r: PointerValue<'ctx>) -> PointerValue<'ctx> {
+        let dst = self.bigint_new();
+        match op {
+            BinOp::Tetration => {
+                self.builder
+                    .build_call(self.bigint.tetration, &[dst.into(), l.into(), r.into()], "bigint_tetration_call")
+                    .unwrap();
+            }
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Pow => {
+                let shim_fn = match op {
+                    BinOp::Add => self.bigint.add,
+                    BinOp::Sub => self.bigint.sub,
+                    BinOp::Mul => self.bigint.mul,
+                    BinOp::Div => self.bigint.div,
+                    BinOp::Pow => self.bigint.pow,
+                    _ => unreachable!(),
+                };
+                self.builder.build_call(shim_fn, &[dst.into(), l.into(), r.into()], "bigint_op_call").unwrap();
+            }
+            other => panic!("compile_bigint_arith called with non-arithmetic op {other:?}"),
+        }
+        self.bigint_temps.push((dst, self.wrap_bigint_ptr(dst)));
+        dst
+    }
+
     /// Compiles `expr` and coerces it to `ty` -- the `compile_expr` +
     /// `coerce_to_type` pair every storage/passing boundary (variable
     /// declaration, reassignment, function argument, return value) needs.
@@ -900,6 +1254,44 @@ impl<'ctx> Codegen<'ctx> {
             let iv = self.compile_int_expr(expr)?;
             return Ok(self.coerce_int_width(iv, width).into());
         }
+        // A bare numeric literal assigned to `bigint` -- same reasoning
+        // as the `bignum` case above (read the original digit text
+        // directly, not the lossy `f64` `compile_expr`'s generic
+        // `Expr::Num` arm would produce), just with no precision
+        // parameter to thread through.
+        if let (Expr::Num(_, text), Type::BigInt) = (expr, ty) {
+            let text_ptr = self.builder.build_global_string_ptr(text, "bigint_lit").unwrap().as_pointer_value();
+            return Ok(self.coerce_to_type(text_ptr.into(), ty));
+        }
+        // Same propagation as `int` above -- `var:bigint 'c' = (2) xx
+        // (10);` has neither operand independently anchored as `bigint`
+        // on its own, so `compile_expr`'s own `Expr::Binary`/`Unary`
+        // arms (which only fork into `compile_bigint_expr` once
+        // `expr_is_bigint` already finds a `bigint`-shaped operand)
+        // would never trigger on their own here.
+        if let (Expr::Binary(_, op, _), Type::BigInt) = (expr, ty) {
+            if *op != BinOp::Concat {
+                let ptr = self.compile_bigint_expr(expr)?;
+                // `compile_bigint_expr` always registers its own result in
+                // `bigint_temps` (mirroring every other bigint-producing
+                // path) -- but this is an early return, bypassing the
+                // adoption check further down that would normally remove
+                // it. Without this, the handle stays in `bigint_temps`
+                // even as it's handed back here as the value actually
+                // being stored -- end-of-statement cleanup would then free
+                // it right out from under whatever just received it (a
+                // real bug, caught by an actual crash/garbage-value test:
+                // `var:bigint 'f' = (30)!;` printed a freed handle's
+                // leftover bytes instead of the real factorial).
+                self.bigint_temps.retain(|(p, _)| *p != ptr);
+                return Ok(self.wrap_bigint_ptr(ptr));
+            }
+        }
+        if let (Expr::Unary(_, _), Type::BigInt) = (expr, ty) {
+            let ptr = self.compile_bigint_expr(expr)?;
+            self.bigint_temps.retain(|(p, _)| *p != ptr);
+            return Ok(self.wrap_bigint_ptr(ptr));
+        }
         let value = self.compile_expr(expr)?;
 
         // If `value` is itself a not-yet-consumed bignum_temps entry (a
@@ -918,6 +1310,16 @@ impl<'ctx> Codegen<'ctx> {
         if let Type::BigNum(target_precision) = ty {
             if let Some(idx) = self.bignum_temps.iter().position(|(_, v, p)| *v == value && *p == target_precision) {
                 self.bignum_temps.remove(idx);
+                return Ok(value);
+            }
+        }
+
+        // Same adoption trick as bignum's above, simpler here since
+        // there's no precision to match -- just whether this exact value
+        // is a not-yet-consumed bigint_temps entry.
+        if ty == Type::BigInt {
+            if let Some(idx) = self.bigint_temps.iter().position(|(_, v)| *v == value) {
+                self.bigint_temps.remove(idx);
                 return Ok(value);
             }
         }
@@ -1100,6 +1502,7 @@ impl<'ctx> Codegen<'ctx> {
                 .basic()
                 .unwrap(),
             ElementType::BigNum(precision) => self.coerce_to_bignum(loaded, precision),
+            ElementType::BigInt => self.coerce_to_bigint(loaded),
             ElementType::Num(_) | ElementType::NumW(_) | ElementType::Bool | ElementType::Int(_) => loaded,
         };
         let value_slot = self.entry_alloca(elem_llvm_ty, "array_copy_value_slot");
@@ -1184,6 +1587,18 @@ impl<'ctx> Codegen<'ctx> {
         self.builder.build_call(self.bignum.free, &[ptr.into()], "bignum_free_call").unwrap();
     }
 
+    /// Same job as `free_bignum_var`, for `bigint`.
+    fn free_bigint_var(&mut self, key: &(String, Type)) {
+        let (ptr, llvm_ty) = *self.variables.get(key).expect("free_bigint_var on unknown variable");
+        let loaded = self.builder.build_load(llvm_ty, ptr, "bigint_for_free").unwrap();
+        let handle = self.unwrap_bigint_ptr(loaded);
+        self.free_bigint_ptr(handle);
+    }
+
+    fn free_bigint_ptr(&mut self, ptr: PointerValue<'ctx>) {
+        self.builder.build_call(self.bigint.free, &[ptr.into()], "bigint_free_call").unwrap();
+    }
+
     /// Frees the `str` buffer currently stored in `key`'s variable slot.
     /// Always safe to call unconditionally: every `str` variable's stored
     /// pointer is always its own `strdup`'d copy (see `coerce_to_type`),
@@ -1230,6 +1645,7 @@ impl<'ctx> Codegen<'ctx> {
         match elem {
             ElementType::Str | ElementType::File => self.free_array_str_elements(handle),
             ElementType::BigNum(_) => self.free_array_bignum_elements(handle),
+            ElementType::BigInt => self.free_array_bigint_elements(handle),
             ElementType::Num(_) | ElementType::NumW(_) | ElementType::Bool | ElementType::Int(_) => {}
         }
         self.builder.build_call(self.array_free_fn, &[handle.into()], "array_free_call").unwrap();
@@ -1338,6 +1754,56 @@ impl<'ctx> Codegen<'ctx> {
         self.builder.position_at_end(end_bb);
     }
 
+    /// Same shape as `free_array_bignum_elements`, for `bigint` elements.
+    fn free_array_bigint_elements(&mut self, handle: PointerValue<'ctx>) {
+        let function = self.current_function();
+        let i64_ty = self.context.i64_type();
+        let bigint_ty = self.bigint_struct_ty;
+
+        let length = self
+            .builder
+            .build_call(self.array_length_fn, &[handle.into()], "arr_free_bigint_len")
+            .unwrap()
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_int_value();
+
+        let counter_slot = self.entry_alloca(i64_ty.into(), "arr_free_bigint_i");
+        self.builder.build_store(counter_slot, i64_ty.const_int(1, true)).unwrap();
+
+        let cond_bb = self.context.append_basic_block(function, "arr_free_bigint_cond");
+        let body_bb = self.context.append_basic_block(function, "arr_free_bigint_body");
+        let end_bb = self.context.append_basic_block(function, "arr_free_bigint_end");
+        self.builder.build_unconditional_branch(cond_bb).unwrap();
+
+        self.builder.position_at_end(cond_bb);
+        let counter = self.builder.build_load(i64_ty, counter_slot, "arr_free_bigint_i_load").unwrap().into_int_value();
+        let keep_going = self
+            .builder
+            .build_int_compare(IntPredicate::SLE, counter, length, "arr_free_bigint_test")
+            .unwrap();
+        self.builder.build_conditional_branch(keep_going, body_bb, end_bb).unwrap();
+
+        self.builder.position_at_end(body_bb);
+        let slot_ptr = self
+            .builder
+            .build_call(self.array_get_ptr_fn, &[handle.into(), counter.into()], "arr_free_bigint_slot")
+            .unwrap()
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_pointer_value();
+        let elem_wrapped = self.builder.build_load(bigint_ty, slot_ptr, "arr_free_bigint_elem").unwrap();
+        let elem_ptr = self.unwrap_bigint_ptr(elem_wrapped);
+        self.free_bigint_ptr(elem_ptr);
+        let counter_next = self.builder.build_int_add(counter, i64_ty.const_int(1, true), "arr_free_bigint_i_next").unwrap();
+        self.builder.build_store(counter_slot, counter_next).unwrap();
+        self.builder.build_unconditional_branch(cond_bb).unwrap();
+
+        self.builder.position_at_end(end_bb);
+    }
+
     /// Ends the innermost block scope: every bignum it owns is freed (skip
     /// this only when the block already ended in `return`, since Return
     /// frees everything itself before the terminator -- freeing again
@@ -1352,6 +1818,7 @@ impl<'ctx> Codegen<'ctx> {
             if emit_frees {
                 match entry.key() {
                     (_, Type::BigNum(_)) => self.free_bignum_var(entry.key()),
+                    (_, Type::BigInt) => self.free_bigint_var(entry.key()),
                     (_, Type::Str | Type::File) => self.free_str_var(entry.key()),
                     (_, Type::Array(_)) => self.free_array_var(entry.key()),
                     _ => {}
@@ -1391,6 +1858,7 @@ impl<'ctx> Codegen<'ctx> {
             Type::Int(width) => self.int_type_for(width).fn_type(&param_types, false),
             Type::Str | Type::File => self.context.ptr_type(AddressSpace::default()).fn_type(&param_types, false),
             Type::BigNum(_) | Type::Array(_) => self.bignum_struct_type().fn_type(&param_types, false),
+            Type::BigInt => self.bigint_struct_ty.fn_type(&param_types, false),
             Type::Void => self.context.void_type().fn_type(&param_types, false),
         };
 
@@ -1493,6 +1961,11 @@ impl<'ctx> Codegen<'ctx> {
                     let zero = self.wrap_bignum_ptr(null_ptr);
                     self.builder.build_return(Some(&zero)).unwrap();
                 }
+                Type::BigInt => {
+                    let null_ptr = self.context.ptr_type(AddressSpace::default()).const_null();
+                    let zero = self.wrap_bigint_ptr(null_ptr);
+                    self.builder.build_return(Some(&zero)).unwrap();
+                }
             }
         }
         Ok(())
@@ -1532,6 +2005,7 @@ impl<'ctx> Codegen<'ctx> {
                 if self.declared_in_current_scope(&key) {
                     match *ty {
                         Type::BigNum(_) => self.free_bignum_var(&key),
+                        Type::BigInt => self.free_bigint_var(&key),
                         Type::Str | Type::File => self.free_str_var(&key),
                         Type::Array(_) => self.free_array_var(&key),
                         _ => {}
@@ -1551,6 +2025,7 @@ impl<'ctx> Codegen<'ctx> {
                 if self.declared_in_current_scope(&key) {
                     match *ty {
                         Type::BigNum(_) => self.free_bignum_var(&key),
+                        Type::BigInt => self.free_bigint_var(&key),
                         Type::Str | Type::File => self.free_str_var(&key),
                         Type::Array(_) => self.free_array_var(&key),
                         _ => {}
@@ -1630,6 +2105,7 @@ impl<'ctx> Codegen<'ctx> {
                 if self.declared_in_current_scope(&key) {
                     match *ty {
                         Type::BigNum(_) => self.free_bignum_var(&key),
+                        Type::BigInt => self.free_bigint_var(&key),
                         Type::Str | Type::File => self.free_str_var(&key),
                         Type::Array(_) => self.free_array_var(&key),
                         _ => {}
@@ -1670,6 +2146,7 @@ impl<'ctx> Codegen<'ctx> {
                 // what it points at.
                 match *ty {
                     Type::BigNum(_) => self.free_bignum_var(&key),
+                    Type::BigInt => self.free_bigint_var(&key),
                     Type::Str | Type::File => self.free_str_var(&key),
                     Type::Array(_) => self.free_array_var(&key),
                     _ => {}
@@ -1720,6 +2197,11 @@ impl<'ctx> Codegen<'ctx> {
                         let old_ptr = self.unwrap_bignum_ptr(old_wrapped);
                         self.free_bignum_ptr(old_ptr);
                     }
+                    ElementType::BigInt => {
+                        let old_wrapped = self.builder.build_load(elem_llvm_ty, slot_ptr, "array_assign_old").unwrap();
+                        let old_ptr = self.unwrap_bigint_ptr(old_wrapped);
+                        self.free_bigint_ptr(old_ptr);
+                    }
                     ElementType::Num(_) | ElementType::NumW(_) | ElementType::Bool | ElementType::Int(_) => {}
                 }
 
@@ -1766,6 +2248,10 @@ impl<'ctx> Codegen<'ctx> {
                 for (ptr, _, _) in temps {
                     self.free_bignum_ptr(ptr);
                 }
+                let bigint_temps: Vec<(PointerValue<'ctx>, BasicValueEnum<'ctx>)> = self.bigint_temps.drain(..).collect();
+                for (ptr, _) in bigint_temps {
+                    self.free_bigint_ptr(ptr);
+                }
                 // Same reasoning as bignum_temps above: coerce_to_type
                 // always strdup's a str return value, so any str_temps
                 // registered while evaluating it (a stch result, a nested
@@ -1788,12 +2274,13 @@ impl<'ctx> Codegen<'ctx> {
                     .rev()
                     .flat_map(|frame| frame.iter().rev())
                     .map(ScopeEntry::key)
-                    .filter(|key| matches!(key.1, Type::BigNum(_) | Type::Str | Type::File | Type::Array(_)))
+                    .filter(|key| matches!(key.1, Type::BigNum(_) | Type::Str | Type::File | Type::Array(_) | Type::BigInt))
                     .cloned()
                     .collect();
                 for key in &to_free {
                     match key.1 {
                         Type::BigNum(_) => self.free_bignum_var(key),
+                        Type::BigInt => self.free_bigint_var(key),
                         Type::Str | Type::File => self.free_str_var(key),
                         Type::Array(_) => self.free_array_var(key),
                         _ => unreachable!(),
@@ -1997,12 +2484,17 @@ impl<'ctx> Codegen<'ctx> {
             for (ptr, _, _) in temps {
                 self.free_bignum_ptr(ptr);
             }
+            let bigint_temps: Vec<(PointerValue<'ctx>, BasicValueEnum<'ctx>)> = self.bigint_temps.drain(..).collect();
+            for (ptr, _) in bigint_temps {
+                self.free_bigint_ptr(ptr);
+            }
             let str_temps: Vec<PointerValue<'ctx>> = self.str_temps.drain(..).collect();
             for ptr in str_temps {
                 self.builder.build_call(self.libc_free, &[ptr.into()], "str_temp_free_call").unwrap();
             }
         } else {
             self.bignum_temps.clear();
+            self.bigint_temps.clear();
             self.str_temps.clear();
         }
         Ok(())
@@ -2021,6 +2513,18 @@ impl<'ctx> Codegen<'ctx> {
                 self.builder.build_load(llvm_ty, ptr, name).unwrap()
             }
             Expr::Unary(op, inner) => {
+                // `bigint` reuses the same `StructValue` shape
+                // bignum/array already use, so this can't be told apart
+                // from the generic shape-based dispatch below the way
+                // int's `IntValue` shape already tells it apart from
+                // bool/float -- checked from the AST first, before
+                // `inner` is even compiled (compiling it the normal way
+                // first, only to discover afterward it needed different
+                // handling, would already be too late/wrong).
+                if self.expr_is_bigint(inner) {
+                    let ptr = self.compile_bigint_expr(expr)?;
+                    return Ok(self.wrap_bigint_ptr(ptr));
+                }
                 let value = self.compile_expr(inner)?;
                 match (op, value) {
                     (UnOp::Neg, BasicValueEnum::FloatValue(f)) => {
@@ -2076,6 +2580,17 @@ impl<'ctx> Codegen<'ctx> {
                 }
             }
             Expr::Binary(lhs, op, rhs) => {
+                // Same reasoning as the `Expr::Unary` fork above: `bigint`
+                // shares bignum/array's `StructValue` shape, so this has
+                // to be caught from the AST *before* either operand (or
+                // the literal-pairing pre-check right below, which
+                // assumes a bare literal paired with a non-`IntValue`
+                // operand should default to `f64`) ever runs.
+                if *op != BinOp::Concat && (self.expr_is_bigint(lhs) || self.expr_is_bigint(rhs)) {
+                    let l = self.compile_bigint_expr(lhs)?;
+                    let r = self.compile_bigint_expr(rhs)?;
+                    return Ok(self.compile_bigint_binary(*op, l, r));
+                }
                 // A bare literal paired with an `int` operand compiles as
                 // an i64 constant directly, not the f64 the generic
                 // `Expr::Num` arm would otherwise produce -- mirrors
@@ -2443,6 +2958,10 @@ impl<'ctx> Codegen<'ctx> {
             let ptr = self.unwrap_bignum_ptr(result);
             self.bignum_temps.push((ptr, result, precision));
         }
+        if let (Type::BigInt, Some(result)) = (return_type, result) {
+            let ptr = self.unwrap_bigint_ptr(result);
+            self.bigint_temps.push((ptr, result));
+        }
         if let (Type::Str, Some(result)) = (return_type, result) {
             self.str_temps.push(result.into_pointer_value());
         }
@@ -2548,6 +3067,23 @@ impl<'ctx> Codegen<'ctx> {
             // widths up to a full i64 first (always safe, never the
             // narrowing/overflow-checked direction of coerce_int_width).
             BasicValueEnum::IntValue(i) => ("%lld", self.coerce_int_width(i, 64).into(), None),
+            // `bigint` is checked first: it's also a `StructValue` (see
+            // `bigint_struct_ty`'s own docs for why), and the two are
+            // told apart here by actual LLVM type, not by shape alone --
+            // the one place in this file that distinction has to be made
+            // from a bare runtime value with no accompanying static type.
+            BasicValueEnum::StructValue(_) if self.is_bigint_value(value) => {
+                let ptr = self.unwrap_bigint_ptr(value);
+                let str_ptr = self
+                    .builder
+                    .build_call(self.bigint.to_string, &[ptr.into()], "bigint_to_string_call")
+                    .unwrap()
+                    .try_as_basic_value()
+                    .basic()
+                    .unwrap();
+                let str_ptr = str_ptr.into_pointer_value();
+                ("%s", str_ptr.into(), Some(str_ptr))
+            }
             BasicValueEnum::StructValue(_) => {
                 let ptr = self.unwrap_bignum_ptr(value);
                 let str_ptr = self

@@ -58,6 +58,12 @@ enum Shape {
     /// never share a shape just because codegen happens to represent them
     /// with the same underlying LLVM value kind.
     Int,
+    /// Also a `StructValue` at the LLVM level, same as `BigNum`/`Array`
+    /// (codegen reuses the same `{ptr}`-wrapped-pointer shape) -- but,
+    /// like `Int` vs `Bool`, a genuinely different thing that must never
+    /// be allowed to mix with `BigNum` here, isolated the same way `Int`
+    /// is isolated from `Num`/`NumW`.
+    BigInt,
 }
 
 fn shape_of(ty: Type) -> Shape {
@@ -68,6 +74,7 @@ fn shape_of(ty: Type) -> Shape {
         Type::BigNum(_) => Shape::BigNum,
         Type::Array(_) => Shape::Array,
         Type::Int(_) => Shape::Int,
+        Type::BigInt => Shape::BigInt,
         Type::Void => panic!("Void has no runtime shape; should never reach type-checking"),
     }
 }
@@ -424,6 +431,12 @@ impl TypeChecker {
                         self.check_int_const_overflow(expr, w);
                         Some(Type::Int(w))
                     }
+                    // No width/precision to preserve or force to a default
+                    // here -- unlike `Int`/`BigNum`, `BigInt` has exactly
+                    // one shape, so both Neg and Factorial just stay
+                    // `BigInt`.
+                    (UnOp::Neg, Type::BigInt) => Some(Type::BigInt),
+                    (UnOp::Factorial, Type::BigInt) => Some(Type::BigInt),
                     (UnOp::Not, Type::Bool) => Some(Type::Bool),
                     // Forced to a fixed result type/width regardless of the
                     // operand's own precision -- matches compile_factorial
@@ -463,6 +476,7 @@ impl TypeChecker {
                         let rty = self.check_expr(rhs);
                         let lty = match rty {
                             Some(Type::Int(w)) => self.check_whole_number_literal(*n, text, w),
+                            Some(Type::BigInt) => self.check_whole_number_bigint_literal(*n),
                             _ => self.check_expr(lhs),
                         };
                         (lty, rty)
@@ -471,6 +485,7 @@ impl TypeChecker {
                         let lty = self.check_expr(lhs);
                         let rty = match lty {
                             Some(Type::Int(w)) => self.check_whole_number_literal(*n, text, w),
+                            Some(Type::BigInt) => self.check_whole_number_bigint_literal(*n),
                             _ => self.check_expr(rhs),
                         };
                         (lty, rty)
@@ -587,6 +602,20 @@ impl TypeChecker {
                     BinOp::Concat => unreachable!("Concat is handled before check_binary is called"),
                 }
             }
+            // No width to widen to -- unlike `Int`, `BigInt` is unbounded,
+            // so both operands are always already the same type and the
+            // result always just stays `BigInt`.
+            (Shape::BigInt, Shape::BigInt) => match op {
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Pow | BinOp::Tetration => {
+                    Some(Type::BigInt)
+                }
+                BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => Some(Type::Bool),
+                BinOp::And | BinOp::Or => {
+                    self.error(format!("{op} requires bool operands, not bigint"));
+                    None
+                }
+                BinOp::Concat => unreachable!("Concat is handled before check_binary is called"),
+            },
             _ => {
                 self.error(format!("{op} used with mismatched operand types {lty} / {rty}"));
                 None
@@ -669,6 +698,9 @@ impl TypeChecker {
         if let (Expr::Num(n, text), Type::Int(width)) = (expr, target) {
             return self.check_whole_number_literal(*n, text, width);
         }
+        if let (Expr::Num(n, _), Type::BigInt) = (expr, target) {
+            return self.check_whole_number_bigint_literal(*n);
+        }
         // Propagate an `int` target into a binary/unary expression's own
         // operands too -- not just a bare literal directly assigned.
         // `var:int 'c' = (2) xx (10);` has *neither* operand already
@@ -708,6 +740,29 @@ impl TypeChecker {
                 self.check_int_const_overflow(expr, width);
             }
             return result;
+        }
+        // Same propagation as `Int` above -- `var:bigint 'c' = (2) xx
+        // (10);` has neither operand independently anchored as `bigint`
+        // on its own, so the assignment target is what makes the intent
+        // unambiguous. No overflow check needed afterward, unlike `Int`:
+        // `bigint` never overflows.
+        if let (Expr::Binary(lhs, op, rhs), Type::BigInt) = (expr, target) {
+            if *op != BinOp::Concat {
+                let lty = self.check_expr_for(lhs, target);
+                let rty = self.check_expr_for(rhs, target);
+                return self.check_binary(*op, lty?, rty?);
+            }
+        }
+        if let (Expr::Unary(op, inner), Type::BigInt) = (expr, target) {
+            let ity = self.check_expr_for(inner, target)?;
+            return match op {
+                UnOp::Neg => Some(ity),
+                UnOp::Factorial => Some(Type::BigInt),
+                UnOp::Not => {
+                    self.error(format!("{op} not supported on {ity}"));
+                    None
+                }
+            };
         }
         let (Expr::ArrayLiteral(elements), Type::Array(elem)) = (expr, target) else {
             return self.check_expr(expr);
@@ -751,6 +806,21 @@ impl TypeChecker {
             return None;
         }
         Some(Type::Int(width))
+    }
+
+    /// Same job as `check_whole_number_literal`, but for `bigint` -- no
+    /// range check needed at all, since it's unbounded: the only thing
+    /// that could ever make a literal invalid here is not being a whole
+    /// number in the first place. Doesn't need the literal's original
+    /// digit text (unlike codegen's construction, which reads it
+    /// directly to avoid `f64` precision loss) -- `n.fract()` alone is
+    /// enough to tell a fractional value apart from a whole one.
+    fn check_whole_number_bigint_literal(&mut self, n: f64) -> Option<Type> {
+        if n.fract() != 0.0 {
+            self.error(format!("{n} is not a whole number, can't use it as bigint"));
+            return None;
+        }
+        Some(Type::BigInt)
     }
 
     /// After `expr` type-checks as `Type::Int(width)`, also tries to
@@ -892,6 +962,9 @@ fn coercible(from: Type, to: Type) -> bool {
         // actual safety at runtime (widening is always safe, narrowing
         // is overflow-checked and crashes if the value doesn't fit).
         (Type::Int(_), Type::Int(_)) => true,
+        // Same isolation as `int` above, but with no width to freely
+        // interconvert between -- `bigint` only ever accepts `bigint`.
+        (Type::BigInt, Type::BigInt) => true,
         // No cross-element-type coercion -- an array:num can't quietly
         // become an array:str the way a bare num can become a str-typed
         // display via stch. Element types must match exactly.

@@ -41,6 +41,11 @@ fn main() {
 
     cc::Build::new()
         .file("runtime/gmp/bignum_shim.c")
+        // bigint's own shim (mpz_t, GMP's arbitrary-precision integer) --
+        // compiled into the same static library as bignum_shim.c since
+        // both are thin wrappers over the same GMP/mimalloc pairing, with
+        // nothing else needing its own separate lib/env var for this.
+        .file("runtime/gmp/bigint_shim.c")
         .include(format!("{gmp_prefix}/include"))
         .include(format!("{mimalloc_prefix}/include"))
         .opt_level(2)
@@ -50,6 +55,7 @@ fn main() {
     println!("cargo:rustc-env=CYBORGPL_GMP_LIB_DIR={gmp_prefix}/lib");
     println!("cargo:rustc-env=CYBORGPL_MIMALLOC_LIB_DIR={mimalloc_prefix}/lib");
     println!("cargo:rerun-if-changed=runtime/gmp/bignum_shim.c");
+    println!("cargo:rerun-if-changed=runtime/gmp/bigint_shim.c");
 
     cc::Build::new()
         .file("runtime/io/input_shim.c")

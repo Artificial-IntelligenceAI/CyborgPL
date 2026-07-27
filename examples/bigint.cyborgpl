@@ -1,0 +1,28 @@
+func 'add_bigint'*'a': bigint, 'b': bigint* -> bigint {
+    return (ref:var:bigint 'a') + (ref:var:bigint 'b');
+}
+
+START
+    # A literal far bigger than int/num could ever hold exactly.
+    var:bigint 'huge' = (99999999999999999999999999999999999999999999999999);
+    print*"huge=" (ref:var:bigint 'huge')*;
+
+    var:bigint 'a' = (123456789012345678901234567890);
+    var:bigint 'b' = (2);
+    print*"a+b=" (ref:var:bigint 'a') + (ref:var:bigint 'b')*;
+    print*"a x b=" (ref:var:bigint 'a') x (ref:var:bigint 'b')*;
+    print*"a>b: " (ref:var:bigint 'a') > (ref:var:bigint 'b')*;
+
+    # Never overflows -- 50! is far beyond what int (even 64-bit) can hold.
+    var:bigint 'f' = (50)!;
+    print*"50!=" (ref:var:bigint 'f')*;
+
+    var:bigint 'tet' = (3) xxx (3);
+    print*"3 xxx 3=" (ref:var:bigint 'tet')*;
+
+    var:bigint 'sum' = ref:func 'add_bigint'*(ref:var:bigint 'a'), (ref:var:bigint 'b')*;
+    print*"sum via func=" (ref:var:bigint 'sum')*;
+
+    var:array:bigint 'arr' = {(1), (2), (99999999999999999999999999999999)};
+    print*"arr[3]=" (ref:var:array:bigint 'arr'*(3)*)*;
+END

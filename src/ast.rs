@@ -38,6 +38,17 @@ pub enum Type {
     /// convention) -- widening is always safe, narrowing is checked at
     /// runtime and crashes if the value doesn't actually fit.
     Int(u32),
+    /// Arbitrary-precision *integer* (GMP's mpz_t) -- `bignum`'s exact
+    /// counterpart, but whole numbers only, never a fractional part, and
+    /// never any [precision:N]: unlike `bignum` (which needs a bit count
+    /// because it's tracking decimal precision) or `int` (a fixed
+    /// hardware width), there's no size to choose here at all -- it just
+    /// grows to hold whatever value it's given. Isolated like `Int`
+    /// (only coerces from `BigInt` itself, no auto-mixing with
+    /// `Num`/`NumW`/`BigNum`/`Int`) rather than absorbing everything the
+    /// way `BigNum` does -- it exists to guarantee an exact integer, the
+    /// same guarantee `Int` makes, just without a ceiling to overflow.
+    BigInt,
     /// A growable, homogeneous array of `ElementType`. Flat (not `Box`ed
     /// or recursive) specifically so `Type` can stay `Copy` -- no arrays
     /// of arrays for this first version, only scalar element types.
@@ -58,6 +69,7 @@ pub enum ElementType {
     BigNum(u32),
     File,
     Int(u32),
+    BigInt,
 }
 
 impl ElementType {
@@ -70,6 +82,7 @@ impl ElementType {
             ElementType::BigNum(p) => Type::BigNum(p),
             ElementType::File => Type::File,
             ElementType::Int(w) => Type::Int(w),
+            ElementType::BigInt => Type::BigInt,
         }
     }
 
@@ -85,6 +98,7 @@ impl ElementType {
             Type::BigNum(p) => Some(ElementType::BigNum(p)),
             Type::File => Some(ElementType::File),
             Type::Int(w) => Some(ElementType::Int(w)),
+            Type::BigInt => Some(ElementType::BigInt),
             Type::Array(_) | Type::Void => None,
         }
     }
@@ -145,6 +159,7 @@ impl std::fmt::Display for Type {
             Type::BigNum(p) => write!(f, "bignum[precision:{p}]"),
             Type::File => write!(f, "file"),
             Type::Int(w) => write!(f, "int[precision:{w}]"),
+            Type::BigInt => write!(f, "bigint"),
             Type::Array(elem) => write!(f, "array:{elem}"),
             Type::Void => write!(f, "void"),
         }

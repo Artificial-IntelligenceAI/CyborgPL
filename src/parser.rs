@@ -131,6 +131,11 @@ impl Parser {
             "bignum" => Ok(Type::BigNum(DEFAULT_BIGNUM_PRECISION)),
             "file" => Ok(Type::File),
             "int" => Ok(Type::Int(DEFAULT_INT_PRECISION)),
+            // Arbitrary-precision integer -- no [precision:N] at all (see
+            // Type::BigInt's own doc comment for why); parse_optional_precision's
+            // catch-all already rejects one being written, same as it
+            // would for `bool`/`str`.
+            "bigint" => Ok(Type::BigInt),
             // `array:elem_type`, e.g. `array:num`, `array:str` -- the
             // element type is parsed with the exact same grammar a bare
             // type would be (including its own `[precision:N]`, e.g.
