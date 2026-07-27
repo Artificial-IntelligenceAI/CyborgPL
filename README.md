@@ -1,6 +1,6 @@
 # CyborgPL
 
-# MUST READ: CyborgPL may be abandoned, until I get a bigger Claude Subscription(and when I want to work on it). because, as you can see in my GitHub. I'm working on more projects, like a horror MC mod, etc.
+# MUST READ: CyborgPL may be abandoned, until I get a bigger Claude Subscription (and when I want to work on it). because, as you can see in my GitHub. I'm working on more projects, like a horror MC mod, etc.
 
 CyborgPL is a hobby programming language that compiles to native machine code via LLVM. It's a personal project for exploring language design and compiler internals — not a production tool.
 
